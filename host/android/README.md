@@ -526,6 +526,7 @@ capability has a call of its own.
 | 13 | the session's orientation lock (LLP 1133.029 D6) | 0 for none; or 1, the orientations its types allow as bits (portrait-primary 1, portrait-secondary 2, landscape-primary 4, landscape-secondary 8), whether a holder says `natural`, whether one says `current`, a count, and for each holder its node and its word as a string | sets the activity's `requestedOrientation` (`Orientation.told`): the manifest's mapping for the set, `locked` for `current`, the manifest's value for none; on a display 600 dp wide or wider only `current` | none by id: `Native.orientationApplied` reports what was asked, for `state.orientationlock.applied` |
 | 14 | whether a canvas receives pad input (LLP 1133.022 D4) | one word: 1 or 0 | observes controller buttons and joystick motion, consuming them only while 1; Android's fallback keys always pass through for navigation | none |
 | 15 | a GPU surface's haptic message (LLP 1009 D10) | the canvas's view id (a surface id is its module's, and two modules count from 1), then a string: the message's JSON as `exact_gpu::haptics` writes it (a texture's `intensity` and `sharpness`, its stop, or a pattern); exact2 sends a stop when the surface goes | `SurfaceHaptics`, on the vibrator ("Haptics", below); nothing while the activity is paused | none |
+| 16 | a file input's `showPicker` (LLP 1069.002) | the input node, `multiple` (1 or 0), the count of `accept` types, then each type as a string | the system photo picker when its filters fit and it is available, otherwise `ACTION_OPEN_DOCUMENT`; offers HEIC/HEIF for conversion as below and copies the selected URIs into the app's cache off the UI thread (`FilePicker`) | a JSON array of `{path, name, type, extension, extensions}` records: staging path, display name, nullable MIME type and storage extension, and the chooser's mapping of extension tokens to MIME types. Null or an empty array cancels; other text is a refusal reason. The presenter copies into `app:/tmp/picked/`, removes the reader's copies, and fires `change` or journals the refusal and fires `cancel` |
 
 Kinds 5, 6, 7, 8, 13 and 14 are statements of the app's state, told when it changes and anew to a reader made again; exact2
 reads them as the queue is taken (`Presenter::tell_shell`), Back, the wake lock and the orientation lock only after a
@@ -558,7 +559,41 @@ where it is asked (`Presenter::request`, which wakes the reader); with an answer
 row above. What layout needs while it runs (a field's metrics, D8) is not a request: a queue taken after the frame is
 too late for it.
 
-**Not on it yet:** the file pickers (`showPicker`, `saveFile`, the document pickers) are still refused, and the journal
+**File inputs.** The photo picker is available from Android 13 or Android 11 with R extension 2. Older devices use
+`ACTION_OPEN_DOCUMENT`. Extensions in `accept` map through `MimeTypeMap`; any unknown extension requires an
+unrestricted document picker. The photo picker takes `image/*`, `video/*`, or both wildcards.
+Specific MIME types and other lists use the document picker with `EXTRA_MIME_TYPES` when needed.
+The presenter checks each delivered file against `accept`; an extension token can match by MIME when the name
+has no extension or its extension maps to that MIME. Thus `.jpg` accepts a provider's JPEG named
+`photo.jpeg` or `photo`, but rejects `invoice.exe` and `scan.png`. `multiple` uses the photo picker's maximum or `EXTRA_ALLOW_MULTIPLE`.
+
+The result callback takes the persistable read grant offered by both pickers before returning. A worker reads
+provider metadata, opens streams and copies into private staging files. Completion returns to the main thread
+before `Exact.answer`, including when no owner thread is configured, and releases the grant acquired for the
+import. Overlapping imports share it; a permission already held by the app is left intact. Display names are
+single path segments, with separators and NUL removed and `.` and `..` replaced. The provider's MIME type is
+retained; extension inference is the fallback when it supplies none. Kotlin carries its extension-to-MIME mapping into Rust's
+validation, and the storage extension follows the delivered MIME independently of the display name. Rust
+imports the staged files off its owner thread and reads at most 1 MiB for image dimensions; unsupported or
+unreadable metadata stays absent. The files have no host size limit. A failed or stale selection removes its
+copies; a missing file input receives no event. Path allocation
+survives runner replacement, including imports still in flight. Neither picker asks for a storage permission.
+Pending results survive activity recreation; process death ends the session.
+
+A missing Photo Picker activity reports `file picker: photo picker unavailable; using document picker` through
+the request channel. Rust journals it and keeps the request open while the reader falls back once to the document
+picker. A real Back still answers null; a missing document activity refuses and cancels. Under the agent the
+picker is held. HEIC/HEIF stays unchanged when `accept` allows it, including `image/*`; when D6 requires JPEG,
+Android's `ImageDecoder` applies orientation and encodes at quality 90 without the source metadata. The result
+keeps the display name and carries `image/jpeg`. A specific list containing `image/jpeg`, `.jpg` or `.jpeg`
+uses the document picker with `image/heic` and `image/heif` alongside the requested MIME types.
+A PNG-only filter offers no HEIC conversion. The converted result must still meet `accept`. See Android's
+[photo picker](https://developer.android.com/training/data-storage/shared/photo-picker),
+[ImageDecoder](https://developer.android.com/reference/android/graphics/ImageDecoder) and
+[document intents](https://developer.android.com/guide/components/intents-common#Storage).
+
+**Not on it yet:** `saveFile` and the document-handle pickers (`showOpenFilePicker`, `showDirectoryPicker`,
+`showSaveFilePicker`) are still refused, and the journal
 then says the channel does not carry them yet. `@exact/notifications` has no Android implementation until LLP 1133.004
 stage 3. Accessibility events
 (D13) will take it too.

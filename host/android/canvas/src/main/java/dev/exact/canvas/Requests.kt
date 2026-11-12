@@ -93,11 +93,12 @@ internal class Requests(private val activity: ExactActivity) {
                     ORIENTATION -> orientation.told(words, body)
                     // The surface, then its message's JSON.
                     SURFACE_HAPTIC -> (haptics ?: SurfaceHaptics(activity, paused).also { haptics = it }).told(words[body], string(words, body + 1).first)
+                    FILES -> files(id, words, body)
                 }
             } catch (e: RuntimeException) {
                 // The platform refused (no activity to start from, a full clipboard transaction): the app goes on.
                 Log.w(TAG, "request $id kind $kind: $e")
-                if (kind == SHARE && sharing.remove(id)) Exact.answer(id, e.message ?: e.javaClass.simpleName)
+                if (kind == FILES || (kind == SHARE && sharing.remove(id))) Exact.answer(id, e.message ?: e.javaClass.simpleName)
             }
         }
     }
@@ -149,6 +150,16 @@ internal class Requests(private val activity: ExactActivity) {
             Log.e(TAG, "picker $kind: $e")
             answer(null)
         }
+    }
+
+    private fun files(id: Int, words: IntArray, body: Int) {
+        var at = body + 3
+        val accept = List(words[body + 2]) {
+            val (type, next) = string(words, at)
+            at = next
+            type
+        }
+        FilePicker.show(activity, accept, words[body + 1] != 0) { Exact.answer(id, it) }
     }
 
     /** A link that leaves the app: an `http` or `https` URL in the browser (or the app that claims it), `mailto:` in
@@ -270,6 +281,7 @@ internal class Requests(private val activity: ExactActivity) {
         const val ORIENTATION = 13
         const val PAD_INPUT = 14
         const val SURFACE_HAPTIC = 15
+        const val FILES = 16
         /** How long after the activity is in front again a share sheet's choice is still waited for. */
         const val DISMISSED_MS = 500L
     }

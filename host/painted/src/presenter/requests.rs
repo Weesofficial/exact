@@ -89,6 +89,9 @@ pub enum Request {
     /// `exact_gpu::haptics` wrote it: the shell plays it on the vibrator.
     /// The canvas's view id, then the JSON.
     SurfaceHaptic(u32, String),
+    /// A file input's picker: the shell answers with a JSON array of its
+    /// cache copies' paths, null to cancel, or a refusal reason.
+    Files(exact_runner::PickerRequest),
 }
 
 /// What a picker is opened with, each value as HTML writes it and empty
@@ -130,6 +133,7 @@ impl Request {
             Request::Orientation(_) => 13,
             Request::PadInput(_) => 14,
             Request::SurfaceHaptic(..) => 15,
+            Request::Files(_) => 16,
         }
     }
 }
@@ -192,7 +196,7 @@ impl Haptic {
 
 /// A request the shell took and has not answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Waiting {
+pub(super) enum Waiting {
     /// The share sheet: its outcome is a journal line (LLP 1069.003 D2).
     Share,
     /// A date or time control's picker: its answer is the control's value.
@@ -200,6 +204,9 @@ enum Waiting {
     /// A package's picture (`pictures.rs`): answered with its pixels, by
     /// the image sync's ticket.
     Picture(u64),
+    /// None after the input is replaced: still consume and remove the
+    /// shell's copies, but never deliver them to the new input.
+    Files(Option<ViewId>),
 }
 
 /// Module calls' bodies and replies, handed over from the native slot's
@@ -214,7 +221,9 @@ pub(super) struct State {
     /// The last id given; ids start at 1 and are never reused.
     last: u32,
     queued: Vec<(u32, Request)>,
-    waiting: BTreeMap<u32, Waiting>,
+    pub(super) waiting: BTreeMap<u32, Waiting>,
+    pub(super) importing: std::collections::BTreeSet<u32>,
+    pub(super) files: super::picker::Inbox,
     /// What the shell was last told of Back, the kernel epoch that was read
     /// at, and what it was last told of the keyboard.
     back: Option<bool>,
@@ -302,6 +311,16 @@ fn encode(id: u32, request: &Request, out: &mut Vec<i32>) {
                 }
             }
         },
+        Request::Files(picker) => {
+            out.extend([
+                picker.view as i32,
+                i32::from(picker.multiple),
+                picker.accept.len() as i32,
+            ]);
+            for mime in &picker.accept {
+                string(out, mime);
+            }
+        }
         Request::Surface(surface) => surface.encode(out),
         Request::Hatch(words) => out.extend(words),
         Request::SurfaceHaptic(surface, json) => {
@@ -325,6 +344,29 @@ fn encode(id: u32, request: &Request, out: &mut Vec<i32>) {
 }
 
 impl<D: DataSource> Presenter<D> {
+    pub(super) fn request_files(&mut self, picker: exact_runner::PickerRequest) {
+        let view = picker.view;
+        if self
+            .requests
+            .waiting
+            .values()
+            .any(|w| *w == Waiting::Files(Some(view)))
+        {
+            let id = self
+                .host
+                .kernel()
+                .node(view)
+                .and_then(|n| n.props.str(PropId::Id))
+                .unwrap_or("");
+            self.host.log(format!("picker: {id:?} is already open"));
+            return;
+        }
+        let request = self.request(Request::Files(picker));
+        self.requests
+            .waiting
+            .insert(request, Waiting::Files(Some(view)));
+    }
+
     /// A shell takes this presenter's requests from now on: the commands
     /// that ask the platform for something are queued for it, where a host
     /// with no shell refuses them or does nothing.
@@ -698,6 +740,15 @@ impl<D: DataSource> Presenter<D> {
             });
             return true;
         }
+        if self.requests.importing.contains(&id) {
+            return false;
+        }
+        if matches!(self.requests.waiting.get(&id), Some(Waiting::Files(_)))
+            && answer == Some("file picker: photo picker unavailable; using document picker")
+        {
+            self.host.log(answer.unwrap());
+            return true;
+        }
         let Some(waiting) = self.requests.waiting.remove(&id) else {
             return false;
         };
@@ -724,6 +775,7 @@ impl<D: DataSource> Presenter<D> {
                 None => self.host.log(format!("picker: dismissed for {node}")),
             },
             Waiting::Picture(ticket) => self.picture_cancelled(ticket, answer),
+            Waiting::Files(view) => self.files_chosen(id, view, answer),
         }
         true
     }
@@ -733,14 +785,15 @@ impl<D: DataSource> Presenter<D> {
     /// cancelled, since nothing will answer it. A picker is the exception:
     /// it is the activity's, which answers it as it closes, whether the
     /// person chose or the activity went (`Requests.destroy`), and a reader
-    /// made again over the same activity leaves it up.
+    /// made again over the same activity leaves it up. File pickers use
+    /// the process-owned activity-result callback across activity recreation.
     pub(super) fn requests_reset(&mut self) {
         (self.requests.back, self.requests.back_epoch) = (None, None);
         self.requests.keyboard = None;
         (self.requests.wakelock, self.requests.wakelock_epoch) = (None, None);
         self.requests.pad_input = None;
         let waiting: Vec<u32> = (self.requests.waiting.iter())
-            .filter(|(_, w)| !matches!(w, Waiting::Pick(_)))
+            .filter(|(_, w)| !matches!(w, Waiting::Pick(_) | Waiting::Files(_)))
             .map(|(id, _)| *id)
             .collect();
         for id in waiting {
@@ -754,7 +807,7 @@ impl<D: DataSource> Presenter<D> {
     pub(crate) fn picks_renewed(&mut self, renewed: &[ViewId]) {
         self.drop_picks(|node| renewed.contains(&node));
         // And one held for the agent.
-        let kinds = ["date", "time", "datetime-local"];
+        let kinds = ["date", "time", "datetime-local", "pick"];
         self.host.runner_mut().retire_holds_on(renewed, &kinds);
     }
 
@@ -765,6 +818,13 @@ impl<D: DataSource> Presenter<D> {
     }
 
     fn drop_picks(&mut self, stale: impl Fn(ViewId) -> bool) {
+        for waiting in self.requests.waiting.values_mut() {
+            if let Waiting::Files(view) = waiting {
+                if view.is_some_and(&stale) {
+                    *view = None;
+                }
+            }
+        }
         let stale: Vec<(u32, ViewId)> = (self.requests.waiting.iter())
             .filter_map(|(id, w)| match w {
                 Waiting::Pick(node) if stale(*node) => Some((*id, *node)),
