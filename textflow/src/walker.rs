@@ -212,11 +212,10 @@ impl Prepared {
                 continue;
             }
             let previous = text[..end].chars().next_back().unwrap();
-            // One collapsed run can cross several UAX mandatory boundaries.
-            if !preserve
-                && whitespace(previous)
-                && text[end..].chars().next().is_some_and(whitespace)
-            {
+            // One whitespace run can cross several UAX mandatory boundaries:
+            // collapsed, or preserved after a carriage return, which CSS
+            // treats as a space.
+            if whitespace(previous) && text[end..].chars().next().is_some_and(whitespace) {
                 continue;
             }
             let source = &text[start..end];

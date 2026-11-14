@@ -768,3 +768,31 @@ fn preserved_controls_a_line_wraps_after_are_measured_and_painted() {
         0..1
     );
 }
+
+/// A preserved carriage return is a space (CSS Text 3 §4.1): it joins the
+/// space run after it and hangs with it, so no line ends between them.
+#[test]
+fn a_preserved_carriage_return_hangs_with_the_spaces_after_it() {
+    let text = "a\r b";
+    let options = Options {
+        white_space: exact_textflow::WhiteSpace::PreWrap,
+        ..Options::default()
+    };
+    // Every character, CR included, advances 8px.
+    let p = Prepared::new(text, options, &mut |r: std::ops::Range<usize>| {
+        8.0 * text[r].chars().count() as f32
+    });
+    for width in [16.0, 8.0] {
+        let got = lines(&p, width);
+        let texts: Vec<&str> = got
+            .iter()
+            .map(|l| &text[l.start.byte..l.end.byte])
+            .collect();
+        assert_eq!(texts, ["a\r ", "b"], "at {width}px");
+        assert_eq!(got[0].width, 8.0, "the CR and space hang at {width}px");
+        assert_eq!(
+            p.paint_range(text, got[0].start.byte..got[0].end.byte),
+            0..1
+        );
+    }
+}
