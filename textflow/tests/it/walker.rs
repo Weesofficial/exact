@@ -730,6 +730,7 @@ fn east_asian_brackets_and_quotes_break_as_chrome() {
         "a/“本/”a",
         "日「/“本",
         "日“本”/。",
+        "本”/“本",
     ] {
         assert_marked_breaks(marked);
     }
@@ -771,4 +772,24 @@ fn decomposed_text_breaks_as_composed() {
     ] {
         assert_marked_breaks(marked);
     }
+}
+
+/// A run of combining marks is walked once, not once per mark, so a long one
+/// still prepares at once, with or without a quote after it.
+#[test]
+fn a_long_combining_mark_run_breaks_in_linear_time() {
+    let started = std::time::Instant::now();
+    let plain = format!("a{}", "\u{301}".repeat(50_000));
+    assert_eq!(exact_textflow::line_breaks(&plain, &[]), [plain.len()]);
+    let quoted = format!("本{}“本", "\u{3099}".repeat(50_000));
+    let quote = quoted.len() - "“本".len();
+    assert_eq!(
+        exact_textflow::line_breaks(&quoted, &[]),
+        [quote, quoted.len()]
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "took {elapsed:?}"
+    );
 }

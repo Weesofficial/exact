@@ -774,18 +774,13 @@ fn opportunities(text: &str, words: &[usize]) -> Vec<usize> {
 /// LB19a). Never where either side's class forbids a break.
 fn east_asian_break(text: &str, at: usize, ch: char) -> bool {
     use BreakClass::*;
-    let Some((start, previous)) = base_before(text, at) else {
-        return false;
-    };
-    let before_before = base_before(text, start).map(|(_, c)| c);
-    let next = text[at + ch.len_utf8()..]
-        .chars()
-        .find(|&c| break_property(c as u32) != CombiningMark);
-    let (left, right) = (break_property(previous as u32), break_property(ch as u32));
+    // The common quotation marks of general category Pi (`«‘‛“‟‹`) and Pf (`»’”›`).
+    let initial = |c: char| "\u{ab}\u{2018}\u{201b}\u{201c}\u{201f}\u{2039}".contains(c);
+    let last = |c: char| "\u{bb}\u{2019}\u{201d}\u{203a}".contains(c);
+    // Rule out by `ch` alone first, so a boundary inside a run of combining
+    // marks never walks the run.
+    let right = break_property(ch as u32);
     let glued = matches!(
-        left,
-        OpenPunctuation | NonBreakingGlue | WordJoiner | ZeroWidthJoiner | Before
-    ) || matches!(
         right,
         ClosePunctuation
             | CloseParenthesis
@@ -801,15 +796,29 @@ fn east_asian_break(text: &str, at: usize, ch: char) -> bool {
             | ZeroWidthJoiner
             | CombiningMark
     );
-    // The common quotation marks of general category Pi (`«‘‛“‟‹`) and Pf (`»’”›`).
-    let initial = |c: char| "\u{ab}\u{2018}\u{201b}\u{201c}\u{201f}\u{2039}".contains(c);
-    let last = |c: char| "\u{bb}\u{2019}\u{201d}\u{203a}".contains(c);
-    !glued
-        && ((matches!(left, Alphabetic | HebrewLetter | Numeric)
-            && right == OpenPunctuation
-            && wide(ch))
-            || (right == Quotation && initial(ch) && wide(previous) && next.is_some_and(wide))
-            || (left == Quotation && last(previous) && before_before.is_some_and(wide) && wide(ch)))
+    let opening = right == Quotation && initial(ch);
+    if glued || !(opening || wide(ch)) {
+        return false;
+    }
+    let Some((start, previous)) = base_before(text, at) else {
+        return false;
+    };
+    let left = break_property(previous as u32);
+    let mark = |c: &char| break_property(*c as u32) == CombiningMark;
+    !matches!(
+        left,
+        OpenPunctuation | NonBreakingGlue | WordJoiner | ZeroWidthJoiner | Before
+    ) && ((matches!(left, Alphabetic | HebrewLetter | Numeric) && right == OpenPunctuation)
+        || (opening
+            && wide(previous)
+            && text[at + ch.len_utf8()..]
+                .chars()
+                .find(|c| !mark(c))
+                .is_some_and(wide))
+        || (left == Quotation
+            && last(previous)
+            && wide(ch)
+            && base_before(text, start).is_some_and(|(_, c)| wide(c))))
 }
 
 /// The character ending before `end`, where it starts, with a combining mark
