@@ -715,6 +715,29 @@ fn a_retried_envelope_cannot_publish_an_index_whose_blob_was_released() {
         .exists());
 }
 
+#[test]
+fn a_release_passes_over_finder_metadata_in_an_epoch() {
+    let fixture = Fixture::new();
+    let root = fixture.dir("cache");
+    let epoch = "9".repeat(32);
+    let digest = format!("{:x}", Sha256::digest("abandoned"));
+    let index = json!({"assets":[]}).to_string();
+    operate(
+        &root,
+        &json!({"op":"retain", "path":format!("{epoch}/1"), "quota":4096, "token":TOKEN,
+            "files":{"assets.json":STANDARD.encode(index), "exact.json":STANDARD.encode("envelope")},
+            "blobs":{ digest.as_str(): STANDARD.encode("abandoned") }}),
+        None,
+    )
+    .unwrap();
+    // Finder writes its metadata into a folder a person opens.
+    fs::write(fixture.path(&format!("cache/{epoch}/.DS_Store")), "finder").unwrap();
+    let release = json!({"op":"release", "token":TOKEN, "blobs":[digest]});
+    let result = operate(&root, &release, None);
+    assert_eq!(result.as_ref().ok(), Some(&json!(1)), "{result:?}");
+    assert!(!fixture.path(&format!("cache/blobs/{digest}")).exists());
+}
+
 /// A link that fails for a reason other than an existing name (here its
 /// temporary file is gone; a volume without hard links fails the same way)
 /// reports that reason, not a conflict with a file that does not exist.

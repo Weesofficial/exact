@@ -252,6 +252,10 @@ fn release(root: &Directory, input: &Value) -> io::Result<Value> {
         }
         let epoch = root.child(&epoch, false)?;
         for seq in epoch.names()? {
+            // Only `retain`'s sequence names are generations; skip others, like Finder's `.DS_Store`.
+            if seq.is_empty() || !seq.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
             let generation = epoch.child(&seq, false)?;
             if generation.kind("exact.json").is_err() {
                 continue;
