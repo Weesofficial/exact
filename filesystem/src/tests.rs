@@ -670,3 +670,25 @@ fn puts_cannot_replace_a_stream_head_or_lock_by_a_folded_spelling() {
         assert_eq!(fs::read_to_string(cohort.join(".lock")).unwrap(), "lock");
     }
 }
+
+/// A link that fails for a reason other than an existing name (here its
+/// temporary file is gone; a volume without hard links fails the same way)
+/// reports that reason, not a conflict with a file that does not exist.
+#[test]
+#[cfg(unix)]
+fn an_immutable_write_reports_why_its_link_failed() {
+    let fixture = Fixture::new();
+    let dir = fixture.dir("origin");
+    let error = dir
+        .write_checked("value", b"bytes", true, TOKEN, || {
+            for name in dir.names()? {
+                if name.starts_with(".tmp-") {
+                    dir.unlink(&name)?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(!fixture.path("origin/value").exists());
+    assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+}
