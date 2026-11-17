@@ -69,6 +69,13 @@ enums emit as strings.
 The plain embedding used to compare component expansion keeps the view
 before this lowering step.
 
+Observe commands carry the host's positional arguments: `observe` emits
+the event name, severity (`"info"` when omitted), then each attribute's
+name and value; `observeAttributes` emits only those pairs. Fields go in
+the order the call names them; the lowerer and the embedding share
+`contract_lower::expr::observe_args`. An attribute value, including a
+nested record, remains one expression.
+
 **Differential testing.** For each case, `difftest` compiles the program to a
 plan and boots it on the runner, delivers the script's events, and prints a
 canonical observation after every step: the outcome, the commits attempted, every root slot, derive

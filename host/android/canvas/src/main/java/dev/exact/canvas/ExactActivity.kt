@@ -153,10 +153,10 @@ open class ExactActivity : Activity() {
     }
 
     /** The location a push Firebase showed opens: `navigate` from the intent its tap starts, which carries the
-     * message's `data` and Firebase's `google.message_id` (LLP 1133.004.000 D7). Nothing else of it is read; `navigate`
-     * has a link's trust, as any app could start the activity with a link. */
+     * message's `data` and Firebase's `google.message_id` (LLP 1133.004.000 D7). [PushLocation] also reads Expo's
+     * `body.navigate`. The location has a link's trust, as any app could start the activity with a link. */
     private fun pushed(intent: android.content.Intent): String? =
-        intent.takeIf { it.hasExtra("google.message_id") }?.getStringExtra("navigate")?.takeIf { it.isNotEmpty() }
+        intent.takeIf { it.hasExtra("google.message_id") }?.let { PushLocation.of(it::getStringExtra) }
 
     /** Whether an accessibility service is on (LLP 1115.001 D13). The reader answers one through its root
      * ([Root], [Access]) and asks exact2 for the tree only while one is on: with none, exact2 is never asked and
