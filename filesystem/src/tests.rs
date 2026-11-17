@@ -670,3 +670,47 @@ fn puts_cannot_replace_a_stream_head_or_lock_by_a_folded_spelling() {
         assert_eq!(fs::read_to_string(cohort.join(".lock")).unwrap(), "lock");
     }
 }
+
+#[test]
+fn a_retried_envelope_cannot_publish_an_index_whose_blob_was_released() {
+    let fixture = Fixture::new();
+    let root = fixture.dir("cache");
+    let epoch = "b".repeat(32);
+    let digest = format!("{:x}", Sha256::digest("bbbb"));
+    let retain = |files: Value, blobs: Value| {
+        operate(
+            &root,
+            &json!({"op":"retain", "path":format!("{epoch}/1"), "quota":4096,
+                "token":TOKEN, "files":files, "blobs":blobs}),
+            None,
+        )
+    };
+    let index = STANDARD.encode(json!({"assets":[{"sha256":digest}]}).to_string());
+    retain(
+        json!({}),
+        json!({ digest.as_str(): STANDARD.encode("bbbb") }),
+    )
+    .unwrap();
+    // The envelope request fails after its index is written, before the envelope.
+    let failed = json!({"assets.json":index, "collision":STANDARD.encode("file"),
+        "collision/child":STANDARD.encode("child"), "exact.json":STANDARD.encode("envelope")});
+    assert!(retain(failed, json!({})).is_err());
+    assert!(fixture
+        .path(&format!("cache/{epoch}/1/assets.json"))
+        .exists());
+    // No published generation names the blob, so a release removes it.
+    let release = json!({"op":"release", "token":TOKEN, "blobs":[digest]});
+    assert_eq!(operate(&root, &release, None).unwrap(), json!(1));
+    // A retry of the envelope names the released blob and must be refused.
+    let retry = json!({"assets.json":index, "exact.json":STANDARD.encode("envelope")});
+    let result = retain(retry, json!({}));
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("missing blob")),
+        "{result:?}"
+    );
+    assert!(!fixture
+        .path(&format!("cache/{epoch}/1/exact.json"))
+        .exists());
+}
