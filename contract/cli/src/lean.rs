@@ -1013,14 +1013,19 @@ impl Emitter<'_> {
             Stmt::Command { name, args, .. } => {
                 // The arguments in the order the runner receives them, `none`
                 // where a named one is left to its default.
-                let ordered = contract_lower::expr::command_args(name, args);
-                let parts = ordered
-                    .iter()
-                    .map(|a| match a {
-                        Some(e) => self.expr(e),
-                        None => Ok(".none".to_string()),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                let parts = match contract_lower::expr::observe_args(name, args) {
+                    Some(flat) => flat
+                        .iter()
+                        .map(|e| self.expr(e))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    None => contract_lower::expr::command_args(name, args)
+                        .iter()
+                        .map(|a| match a {
+                            Some(e) => self.expr(e),
+                            None => Ok(".none".to_string()),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                };
                 format!("(.command {} [{}])", string(name), parts.join(", "))
             }
             Stmt::Send {

@@ -181,7 +181,7 @@ For EAS Build, use [iOS](recipes/eas-ios.md) or [Android](recipes/eas-android.md
 |---|---|
 |`one-screen`|a tracker: a total, quick-add buttons, a dated log in a file|
 |`dashboard`|a summary, bars, dated rows, an add sheet that validates, two columns|
-|`list-detail`|search, a detail, an add sheet, a delete alert, empty states, a file; split when wide|
+|`list-detail`|search, a detail, an add sheet, a delete alert, empty states, SQLite; split when wide|
 |`tabs`|tabs with a badge, a stack in each, a saved set kept with `persist`|
 |`rest`|its own server, polled; a signed-in person (`rest-backend`, `fetch-loading-error`, `after-a-write`)|
 |`site`|a website: a sortable `table` built ahead and filtered by a `select` in the query, a page per item rendered per request with a `dl`, a not-found page, a footer, an API's origin as a setting (`website`)|
@@ -388,6 +388,11 @@ const sources: Sources = {
 };
 export const answer: Answer = (source, args, store, storage, native) => sources[source](args, store, storage, native);
 ```
+
+This file example assumes one writer. A read followed by `atomicWriteFile` is not
+a transaction: another tab can save between them. For an editable collection, use
+`pattern list-detail`, which changes individual SQLite rows and enforces unique
+titles in the database.
 
 **The tests** drive by `testId` on every host, each from empty client storage. An
 owned server restarts empty for each test, including with `database: false`. Remote

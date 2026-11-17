@@ -2436,3 +2436,9 @@ once, then reports it again only after its valid bindings disappear and return. 
   1133.037 D3). Read such a name from `app.ts`, choosing it or its other target's name by
   the status (`attachedList ? attachedPorts({}) : getPorts({})`), as
   `docs/recipes/usb-hid-serial.md` does.
+
+- **A cached JSON collection can lose another tab’s edits.** `atomicWriteFile`
+  protects the replacement, not the read that produced it. Even a fresh read races
+  another writer. Use SQLite statements and constraints for shared collections
+  (`pattern list-detail`); close each connection in `finally` so other web tabs
+  can acquire it.

@@ -3558,7 +3558,11 @@ shows it), on its `channel_id` when the app declares that channel
 icon. Leave out `icon` and `color`: Firebase honours them for a notification it
 shows. A `tag` replaces a shown notification with that tag, a local one
 included, and `closeNotification(tag)` closes it. Its tap opens `navigate`,
-warm or at launch, as on Apple; the other `data` keys are not read.
+warm or at launch, as on Apple. The top-level `navigate` takes precedence.
+When it is absent and `data` carries Expo's `experienceId` or `scopeKey`,
+Exact reads `navigate` from the JSON object encoded in `body` by the Expo push
+service. A blank or non-string location, or a malformed body, opens nothing.
+Another sender's `body` and the other `data` keys are not read.
 
 A data-only message raises `push` on the root with `PushEvent = {data: string}`:
 `JSON.parse(e.data)` reads the FCM `data` map. It uses the live session, or
@@ -3574,8 +3578,13 @@ policy; a server must keep alerts available for the app to reconcile.
 exchanges `android.token` through Expo's service. Pass the app's imported
 `app.json`: `extra.eas.projectId` names its EAS project. The subscription's
 `android.appId` supplies the installed package id, including normalization and
-the selected variant's suffix. It returns
-`{type: "expo", data: "ExponentPushToken[…]"}`.
+the selected variant's suffix. Expo's `deviceId` is a UUID derived from the
+first 16 bytes of the case-sensitive Firebase installation ID's SHA-256,
+with the v4 version and variant bits set. It stays the same while the
+installation ID does, including across FCM token rotations, without separate
+storage. It returns `{type: "expo", data: "ExponentPushToken[…]"}`. An HTTP
+refusal throws with Expo's status and the first 500 characters of its reply;
+if the reply cannot be read, the error still carries the status.
 Grant `net.fetch https://exp.host`, exchange again when the live subscription
 changes, and send the Expo token to your server. The [push recipe](recipes/push.md)
 includes the handler, channel and backend send.
