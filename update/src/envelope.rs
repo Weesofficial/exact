@@ -736,7 +736,12 @@ pub fn check_asset_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result
 /// port: every file card is same-origin in v1. Credentials are refused rather
 /// than copied into a request.
 pub fn resolve_url(base: &str, url: &str) -> Result<String, String> {
-    if base.contains('\\') || url.contains('\\') {
+    // The URL Standard strips a leading C0 control or space and drops a tab
+    // or newline anywhere, so ` https://elsewhere/` is another origin there.
+    if [base, url]
+        .iter()
+        .any(|s| s.contains('\\') || s.bytes().any(|b| b <= b' '))
+    {
         return Err(format!("the url {url} is not an http or https URL"));
     }
     let base = parse_http_url(base, "the envelope url")?;
@@ -1236,6 +1241,13 @@ mod url_tests {
             );
         }
         assert!(resolve_url("https://o.example/i.json", "https://o.example/../x").is_err());
+        for card in [
+            " https://elsewhere.example/x",
+            "ht\ttps://elsewhere.example/x",
+            "\n//elsewhere.example/x",
+        ] {
+            assert!(resolve_url(base, card).is_err(), "{card:?}");
+        }
     }
 }
 
