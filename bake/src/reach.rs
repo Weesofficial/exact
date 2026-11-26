@@ -644,10 +644,12 @@ fn auth(ceiling: &str, platform: &str, compat: &Compat) -> Result<Value, String>
         .filter_map(|c| c.strip_prefix("https://"))
         .filter_map(|rest| rest.split('/').next())
         .filter(|host| {
-            !matches!(
-                host.split(':').next(),
-                Some("localhost" | "127.0.0.1" | "[::1]")
-            )
+            // The host less its port; an IPv6 literal's own colons are inside `[]`.
+            let name = match host.split_once(']') {
+                Some((literal, _)) => &host[..=literal.len()],
+                None => host.split(':').next().unwrap_or(host),
+            };
+            !matches!(name, "localhost" | "127.0.0.1" | "[::1]")
         })
         .map(|host| format!("webcredentials:{host}"))
         .collect();
@@ -1421,6 +1423,32 @@ mod tests {
             .skip(1)
             .all(|l| l.starts_with("grant-runtime: ")));
         assert!(error.contains("only helper executables are admitted"));
+    }
+
+    /// A loopback https callback is the device's own, which no associated
+    /// domain names: `[::1]` with or without a port, as `127.0.0.1` and
+    /// `localhost` are.
+    #[test]
+    fn a_loopback_callback_claims_no_webcredentials() {
+        let dir = tempdir::Dir::new();
+        for callback in [
+            "https://127.0.0.1:8443/cb",
+            "https://localhost/cb",
+            "https://[::1]/cb",
+            "https://[::1]:8443/cb",
+        ] {
+            assert!(
+                exact_runner::grants::parse(&format!("auth.callback {callback}")).is_ok(),
+                "{callback} is a grant line"
+            );
+            let mut ios = compat(&format!("auth.callback {callback}"));
+            derive(&dir.0, "ios", None, &mut ios).unwrap();
+            assert_eq!(
+                ios.reach["auth"]["associatedDomains"],
+                json!([]),
+                "{callback}"
+            );
+        }
     }
 
     #[test]
