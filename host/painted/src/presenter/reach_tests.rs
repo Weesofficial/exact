@@ -83,6 +83,11 @@ fn a_reaching_box_paints_and_takes_hits_past_its_border_box() {
     assert!(p.set_box_reach(card, None));
     assert_eq!(p.hit(17., 37.), Some(id(&p, "clip")));
     assert!(p.frame().data() == empty, "as before the reach");
+    // A fractional reach takes its hits as far as it paints, to the pixel's edge: the card ends at 120, and reaching
+    // 0.5 past it paints and takes the hits to 121
+    assert!(p.set_box_reach(card, Some([0., 0.5, 0., 0.])));
+    assert_eq!(pixel(&mut p, 120., 50.), [255, 0, 0]);
+    assert_eq!(p.hit(120.75, 50.), Some(card));
 }
 
 /// A 300-point scroller at (0, 100) over ten 100-point rows, each its own colour.
@@ -353,4 +358,205 @@ fn a_claimed_scroller_reveals_in_its_clear_region_and_tells_the_runner_its_displ
         "200 + 40 - 100"
     );
     assert_eq!(p.scroll_of(port), (0., 200.));
+}
+
+/// A zoomable scroller's range under a claim is its zoomed content's past its reached port: 1000 over 300 at a zoom of
+/// 1, reaching 40 above and 60 below with no insets, is 600.
+#[test]
+fn a_claimed_zoomable_scroller_takes_the_claims_range() {
+    let source = r##"component App
+  view
+    box width="100%" height="100%" position="relative"
+      scroll testId="port" position="absolute" left=0 top=100 width=300 height=300 -exact-max-zoom=4
+        box width=300 height=1000 background-color="#ff0000"
+"##;
+    let (mut p, error) = Presenter::boot_with(
+        &crate::test_plan(source),
+        (),
+        (400., 800.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    p.frame();
+    let port = id(&p, "port");
+    let max = |p: &Presenter<()>| p.scroller(port, &BTreeMap::new()).unwrap().max;
+    assert_eq!(max(&p).1, 700.);
+    assert!(p.set_scroll_claim(port, Some(([40., 0., 60., 0.], [0.; 4]))));
+    assert_eq!(max(&p).1, 600.);
+}
+
+/// A claimed zoomable scroller pinches within the claim's range and about the content it shows under the fingers: 1000
+/// over 300 with a bottom inset of 100 rests at 800 through a pinch that scales by 1, and with a top reach of 40 and
+/// inset of 100, its content shown 60 short of its offset, a pinch to 2 about 150 down keeps content point 290 there.
+#[test]
+fn a_claimed_zoomable_scroller_pinches_in_the_claims_range_about_what_it_shows() {
+    let source = r##"component App
+  view
+    box width="100%" height="100%" position="relative"
+      scroll testId="port" position="absolute" left=0 top=100 width=300 height=300 -exact-max-zoom=4
+        box width=300 height=1000 background-color="#ff0000"
+"##;
+    let (mut p, error) = Presenter::boot_with(
+        &crate::test_plan(source),
+        (),
+        (400., 800.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    p.frame();
+    let port = id(&p, "port");
+    assert!(p.set_scroll_claim(port, Some(([0.; 4], [0., 0., 100., 0.]))));
+    p.scroll_to(port, (0., 800.));
+    assert_eq!(p.scroll_of(port), (0., 800.));
+    p.zoom_pinch_began(port);
+    p.zoom_pinched(port, 1., (150., 250.), (150., 250.));
+    assert_eq!(
+        p.scroll_of(port),
+        (0., 800.),
+        "the pinch keeps the claim's range"
+    );
+    p.zoom_pinch_ended(port);
+    assert!(p.set_scroll_claim(port, Some(([40., 0., 0., 0.], [100., 0., 0., 0.]))));
+    p.scroll_to(port, (0., 200.));
+    p.zoom_pinch_began(port);
+    p.zoom_pinched(port, 2., (150., 250.), (150., 250.));
+    // Shown from 140, so 290 under the fingers; at 2, 580 shown there from 430, the offset 490, and across, 150 at 2
+    assert_eq!(p.scroll_of(port), (150., 490.));
+}
+
+/// A claimed scroller's thumb lies at its CSS offset, not its content's displacement: at the end of its range the
+/// thumb ends where its track does.
+#[test]
+fn a_claimed_scrollers_thumb_is_at_its_css_offset() {
+    let (mut p, error) = Presenter::boot_with(
+        &crate::test_plan(SCROLLER),
+        (),
+        (400., 800.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    p.brush.scrollbars.enabled = true;
+    let port = id(&p, "port");
+    assert!(p.set_scroll_claim(port, Some(([40., 0., 60., 0.], [100., 0., 60., 0.]))));
+    p.scroll.insert(port, (0., 760.));
+    p.frame();
+    let bar = *p
+        .brush
+        .scrollbars
+        .bars
+        .iter()
+        .find(|b| b.id == port && b.vertical)
+        .unwrap();
+    assert_eq!(bar.offset, 760., "the CSS offset");
+    assert_eq!(
+        bar.thumb.1 + bar.thumb.3,
+        bar.track.1 + bar.track.3,
+        "at the end of its range, the end of its track"
+    );
+}
+
+/// The reach and the extension meet the box's own paint on whole device pixels: a half-transparent card reaching half
+/// a point to the right and extending ten past it shows one fill across the join, and a box that clips its overflow
+/// takes no extension.
+#[test]
+fn an_extension_meets_the_box_on_the_pixel_grid_and_skips_a_clipping_box() {
+    let source = APP.replace("#ff0000", "#ff000080");
+    let (mut p, error) = Presenter::boot_with(
+        &crate::test_plan(&source),
+        (),
+        (400., 800.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    let (card, clip) = (id(&p, "card"), id(&p, "clip"));
+    let inside = pixel(&mut p, 100., 90.);
+    assert!(p.set_box_reach(card, Some([0., 0.5, 0., 0.])));
+    assert!(p.set_box_extension(card, Some([0., 10., 0., 0.])));
+    for x in [119., 120., 121., 125.] {
+        assert_eq!(pixel(&mut p, x, 90.), inside, "one fill at x {x}");
+    }
+    assert!(p.set_box_reach(card, None));
+    assert!(p.set_box_extension(card, None));
+    let before = p.frame().data().to_vec();
+    assert!(p.set_box_extension(clip, Some([20., 20., 20., 20.])));
+    assert!(
+        p.frame().data() == before,
+        "the clipping box paints no strip"
+    );
+}
+
+/// The runner's geometry follows a claim at once and goes back to the CSS offset when it is released, for a scroller
+/// that has never scrolled too.
+#[test]
+fn releasing_a_claim_gives_the_runner_back_the_css_offset() {
+    let (mut p, error) = Presenter::boot_with(
+        &crate::test_plan(SCROLLER),
+        (),
+        (400., 800.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    p.frame();
+    let port = id(&p, "port");
+    assert!(p.set_scroll_claim(port, Some(([40., 0., 60., 0.], [100., 0., 60., 0.]))));
+    assert_eq!(p.host.runner().scroll_offset(Some(port)), (0., -60.));
+    assert!(p.set_scroll_claim(port, None));
+    assert_eq!(p.host.runner().scroll_offset(Some(port)), (0., 0.));
+}
+
+/// A claimed scroller that follows its end keeps it as the claim comes and goes, as UIKit's writer keeps a follower's
+/// (LLP 1123 D14): 500 over 100 at its end, 400, a claim with a bottom inset of 60 gives it 460 and it follows there;
+/// released, it is at 400 again. One short of its end keeps its offset.
+#[test]
+fn a_claimed_scroller_that_follows_its_end_keeps_it() {
+    let source = r#"component App
+  view
+    scroll testId="port" scrollFollowEnd=true width=200 height=100
+      box width=200 height=500
+"#;
+    let (mut p, error) = Presenter::boot_with(
+        &crate::test_plan(source),
+        (),
+        (400., 800.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    p.frame();
+    let port = id(&p, "port");
+    p.scroll_to(port, (0., 400.));
+    p.frame();
+    assert_eq!(p.scroll_of(port), (0., 400.));
+    assert!(p.set_scroll_claim(port, Some(([0.; 4], [0., 0., 60., 0.]))));
+    p.frame();
+    assert_eq!(p.scroll_of(port), (0., 460.), "followed to the claim's end");
+    assert!(p.set_scroll_claim(port, None));
+    p.frame();
+    assert_eq!(p.scroll_of(port), (0., 400.), "clamped back to its end");
+    p.scroll_to(port, (0., 300.));
+    p.frame();
+    assert!(p.set_scroll_claim(port, Some(([0.; 4], [0., 0., 60., 0.]))));
+    p.frame();
+    assert_eq!(
+        p.scroll_of(port),
+        (0., 300.),
+        "short of its end, where it was"
+    );
 }

@@ -992,13 +992,22 @@ impl Painter {
             visible,
             projective: None,
             affine: Some((ts, (x, y, w, h))),
-            // A reaching box takes the hits in its reached frame; what reads its geometry keeps its laid-out box
-            hit: (walk.hit_space.is_some() || p.claimed()).then(|| HitGeometry {
-                shape_clips: Vec::new(),
-                rect: bbox(hit_ts, p.port_reached(p.reached((x, y, w, h)))),
-                clip: hit_clip,
-                affine: Some((hit_ts, p.port_reached(p.reached((x, y, w, h))))),
-                projective: None,
+            // A reaching box takes the hits in its reached frame, snapped outward as it is painted; what reads its
+            // geometry keeps its laid-out box
+            hit: (walk.hit_space.is_some() || p.claimed()).then(|| {
+                let reached = p.port_reached(grid::outward(
+                    p.reached((x, y, w, h)),
+                    p.reach,
+                    ts,
+                    self.scale,
+                ));
+                HitGeometry {
+                    shape_clips: Vec::new(),
+                    rect: bbox(hit_ts, reached),
+                    clip: hit_clip,
+                    affine: Some((hit_ts, reached)),
+                    projective: None,
+                }
             }),
             unpress: if p.press == 1. {
                 Transform::identity()
@@ -1097,7 +1106,12 @@ impl Painter {
         self.clipped = Some((node.id, paint.background));
         let mut geometry = paint.geometry(rect);
         // @ref LLP 1063 — a layout transition's size is the surface's alone, as a reach is (LLP 1123 D13).
-        let mut surface = paint.geometry(shown.reached(shown.surface(rect)));
+        let mut surface = paint.geometry(grid::outward(
+            shown.reached(shown.surface(rect)),
+            shown.reach,
+            ts,
+            self.scale,
+        ));
         self.flight_geometry(node, &mut geometry);
         self.flight_geometry(node, &mut surface);
         // A text node still walks its runs so a visible inline paints.
@@ -1109,7 +1123,16 @@ impl Painter {
             };
             self.row_box_reach(&paint.shadows, surface.outer.rect, geometry.outer.rect, ts);
             paint.paint(self.backend.as_mut(), &surface, ts);
-            self.extension_strip(&shown, paint.background, surface.outer.rect, rect, ts);
+            let kernel = walk.scene.kernel;
+            self.extension_strip(
+                kernel,
+                node,
+                &shown,
+                paint.background,
+                surface.outer.rect,
+                rect,
+                ts,
+            );
             self.column_rules(walk.scene.kernel, node, rect, ts);
             self.prose_marker(walk, node, rect, ts);
             let (dark, feedback) = (

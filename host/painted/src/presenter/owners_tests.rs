@@ -2,7 +2,7 @@
 use super::super::bars::tests::{barred, tap, Nothing, APP};
 use super::super::stage::{sheet_span, SHEET_HANDLE};
 use super::super::*;
-use exact_kernel::{KeyboardReport, OwnerUpdate};
+use exact_kernel::{Keyboard, KeyboardReport, OwnerUpdate};
 
 fn update(p: &Presenter<Nothing>, test_id: &str) -> OwnerUpdate {
     let kernel = p.host().kernel();
@@ -38,7 +38,11 @@ fn a_routes_update_is_the_room_its_bars_take() {
         (&home.margins, &home.segments, &home.chrome, &home.regions),
         (&None, &None, &None, &None)
     );
-    assert_eq!(home.keyboard, KeyboardReport::default());
+    assert_eq!(
+        home.keyboard,
+        KeyboardReport::Dismissed,
+        "Android's window has a software keyboard, none showing"
+    );
     let page = p.page_origin();
     assert_eq!(
         home.window_map.unwrap().0,
@@ -185,4 +189,194 @@ fn a_desktop_shells_routes_keep_bands_of_zero_and_retire_with_their_stack() {
         p.owner_updates().iter().all(|(v, _)| Some(*v) != gone),
         "no update once it has left its stack"
     );
+}
+
+/// Android's software keyboard is the window's bottom inset, docked across its width, in each owner's space; a desktop
+/// shell, which tells no window, leaves it unreported.
+#[test]
+fn a_routes_keyboard_is_the_windows_in_its_own_space() {
+    let (mut p, _) = barred(APP);
+    let mut window = *p.window().unwrap();
+    window.keyboard = [0., 0., 300., 0.];
+    assert_eq!(p.set_window(window), None);
+    let _ = p.after_commit();
+    let home = update(&p, "route-home");
+    let [.., ox, oy] = home.window_map.unwrap().0;
+    let (width, height) = window.size;
+    let shown = Keyboard {
+        frame: [-ox, height - 300. - oy, width, 300.],
+        docked: true,
+    };
+    assert_eq!(home.keyboard, KeyboardReport::Shown(shown));
+    let kernel = p.host.runner_mut().kernel_mut();
+    let route = kernel
+        .node_by_key(kernel.find_by_test_id("route-home")[0])
+        .unwrap()
+        .id;
+    assert!(
+        kernel.update_owner(route, home).is_ok(),
+        "the kernel takes it"
+    );
+    let (desktop, error) = Presenter::boot_with(
+        &crate::test_plan(APP),
+        Nothing,
+        (412., 840.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(
+        update(&desktop, "route-home").keyboard,
+        KeyboardReport::Unreported
+    );
+}
+
+/// A route's map is its published frame once, which is already in the page, less the page's scroll: under a
+/// navigation root at (20, 30) the route lies at (20, 30), and 10 higher once the page has scrolled 10.
+#[test]
+fn a_routes_map_is_its_frame_in_the_page_less_the_pages_scroll() {
+    let source = APP.replace(
+        "    main navigationKey",
+        "    main margin-left=20 margin-top=30 navigationKey",
+    );
+    let (mut p, error) = Presenter::boot_with(
+        &crate::test_plan(&source),
+        Nothing,
+        (412., 840.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    let [.., x, y] = update(&p, "route-home").window_map.unwrap().0;
+    assert_eq!((x, y), (20., 30.));
+    p.page = (0., 10.);
+    let [.., x, y] = update(&p, "route-home").window_map.unwrap().0;
+    assert_eq!((x, y), (20., 20.));
+}
+
+/// A fold's segments are each route's, clipped to it and in its space: a route across a 12-point hinge has both, and
+/// one that lies on one segment has none.
+#[test]
+fn a_routes_segments_are_the_documents_clipped_to_it() {
+    let (mut p, error) = Presenter::boot_with(
+        &crate::test_plan(APP),
+        Nothing,
+        (412., 840.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    let kernel = p.host.runner_mut().kernel_mut();
+    let halves = vec![
+        exact_kernel::Rect {
+            x: 0.,
+            y: 0.,
+            width: 200.,
+            height: 840.,
+        },
+        exact_kernel::Rect {
+            x: 212.,
+            y: 0.,
+            width: 200.,
+            height: 840.,
+        },
+    ];
+    kernel.set_segments(2, 1, halves.clone()).unwrap();
+    let home = update(&p, "route-home");
+    let grid = home.segments.clone().expect("across the hinge");
+    // Clipped to the route, which the tab bar's row leaves short of the page's height
+    let h = p
+        .host()
+        .kernel()
+        .node(id_of(&p, "route-home"))
+        .unwrap()
+        .frame
+        .height;
+    let clipped: Vec<_> = halves
+        .iter()
+        .map(|r| exact_kernel::Rect { height: h, ..*r })
+        .collect();
+    assert!(h < 840.);
+    assert_eq!((grid.cols, grid.rows, grid.rects), (2, 1, clipped));
+    let route = id_of(&p, "route-home");
+    assert!(
+        p.host
+            .runner_mut()
+            .kernel_mut()
+            .update_owner(route, home)
+            .is_ok(),
+        "the kernel takes it"
+    );
+    let source = APP.replace(
+        "    main navigationKey",
+        "    main margin-left=220 navigationKey",
+    );
+    let (mut right, _) = Presenter::boot_with(
+        &crate::test_plan(&source),
+        Nothing,
+        (412., 840.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    let kernel = right.host.runner_mut().kernel_mut();
+    kernel
+        .set_segments(
+            2,
+            1,
+            vec![
+                exact_kernel::Rect {
+                    x: 0.,
+                    y: 0.,
+                    width: 200.,
+                    height: 840.,
+                },
+                exact_kernel::Rect {
+                    x: 212.,
+                    y: 0.,
+                    width: 200.,
+                    height: 840.,
+                },
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        update(&right, "route-home").segments,
+        None,
+        "on one segment"
+    );
+}
+
+fn id_of(p: &Presenter<Nothing>, test_id: &str) -> ViewId {
+    let kernel = p.host().kernel();
+    kernel
+        .node_by_key(kernel.find_by_test_id(test_id)[0])
+        .unwrap()
+        .id
+}
+
+/// While the keyboard's inset animation runs, a route's keyboard is its depth now, not the window's inset, which gives
+/// only its ends; once it ends, the window's again.
+#[test]
+fn a_routes_keyboard_follows_the_keyboards_animation() {
+    let (mut p, _) = barred(APP);
+    let mut window = *p.window().unwrap();
+    window.keyboard = [0., 0., 300., 0.];
+    assert_eq!(p.set_window(window), None);
+    let depth = |p: &Presenter<Nothing>| match update(p, "route-home").keyboard {
+        KeyboardReport::Shown(k) => k.frame[3],
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(depth(&p), 300.);
+    p.set_keyboard_progress(Some(120.));
+    assert_eq!(depth(&p), 120., "halfway up");
+    p.set_keyboard_progress(None);
+    assert_eq!(depth(&p), 300., "the window's once it ends");
 }
