@@ -1352,6 +1352,44 @@ fn the_named_data_crate_and_the_generated_lock_are_identity() {
     assert_ne!(locked, id(&dir, "ios"), "and its edit moves it");
 }
 
+/// The named data crate is found by its package name as Cargo reads it: a
+/// comment after the name, or after the `[package]` header, is TOML's and
+/// not part of either, so the crate is still the one `rust.data` names.
+#[test]
+fn a_comment_beside_the_package_name_still_names_the_data_crate() {
+    let dir = app("named-data-comment");
+    std::fs::remove_dir_all(dir.join("data")).unwrap();
+    let json = std::fs::read_to_string(dir.join("app.json")).unwrap();
+    let named = json.replacen(
+        '{',
+        r#"{"rust":{"data":{"crate":"records","type":"records::Records"}},"#,
+        1,
+    );
+    std::fs::write(dir.join("app.json"), named).unwrap();
+    krate(&dir.join("records"), "records", "[workspace]\n");
+    let manifest = dir.join("records/Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap().replacen(
+        "[package]\nname = \"records\"",
+        "[package] # the app's records\nname = \"records\" # read by rust.data",
+        1,
+    );
+    std::fs::write(&manifest, text).unwrap();
+    let m = Manifest::read(&dir).unwrap();
+    let data = compatibility_with_trust(
+        &dir,
+        "ios",
+        "aarch64-apple-ios",
+        &m,
+        Some(""),
+        "development",
+    )
+    .unwrap()
+    .inputs["dataCrate"]
+        .clone();
+    assert_eq!(data["files"], 3, "the named crate, not data/: {data}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A path crate outside the app's workspace is no member of it, so the
 /// closure is read from Cargo's full graph. An optional dependency there
 /// that Cargo did not enable (`unused`) counts with what it declares
