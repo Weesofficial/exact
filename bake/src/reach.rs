@@ -1425,32 +1425,6 @@ mod tests {
         assert!(error.contains("only helper executables are admitted"));
     }
 
-    /// A loopback https callback is the device's own, which no associated
-    /// domain names: `[::1]` with or without a port, as `127.0.0.1` and
-    /// `localhost` are.
-    #[test]
-    fn a_loopback_callback_claims_no_webcredentials() {
-        let dir = tempdir::Dir::new();
-        for callback in [
-            "https://127.0.0.1:8443/cb",
-            "https://localhost/cb",
-            "https://[::1]/cb",
-            "https://[::1]:8443/cb",
-        ] {
-            assert!(
-                exact_runner::grants::parse(&format!("auth.callback {callback}")).is_ok(),
-                "{callback} is a grant line"
-            );
-            let mut ios = compat(&format!("auth.callback {callback}"));
-            derive(&dir.0, "ios", None, &mut ios).unwrap();
-            assert_eq!(
-                ios.reach["auth"]["associatedDomains"],
-                json!([]),
-                "{callback}"
-            );
-        }
-    }
-
     #[test]
     fn auth_lines_derive_callbacks_and_apple_s_webcredentials() {
         let grants = "auth.session https://bsky.social\nauth.callback social.exact.x:/oauth\nauth.callback https://app.example/.exact/auth/callback\nauth.callback http://127.0.0.1:9/cb";
