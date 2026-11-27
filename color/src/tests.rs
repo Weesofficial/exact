@@ -330,6 +330,36 @@ fn a_form_css_refuses_is_not_a_colour() {
     }
 }
 
+/// CSS's white space is a space, a tab or a newline (CSS Syntax 3 §4.2), not
+/// every Unicode space: Chrome 156 drops `rgb(1\u{a0}2\u{a0}3)` and
+/// `\u{a0}red` and reads `rgb(1\r2\x0c3)`.
+#[test]
+fn only_css_white_space_separates_a_colours_words() {
+    for bad in [
+        "rgb(1\u{a0}2\u{a0}3)",
+        "rgb(1 2 3\u{a0}/ 0.5)",
+        "hsl(120\u{a0}50% 50%)",
+        "rgb(1\u{b}2 3)",
+        "color(srgb\u{a0}1 0 0)",
+        "\u{a0}red",
+        "red\u{2003}",
+        "color(--brand 1\u{a0}0 0)",
+    ] {
+        assert_eq!(parse(bad), None, "{bad:?}");
+        assert_eq!(parse_profiled(bad), None, "{bad:?}");
+    }
+    for good in [
+        "rgb(1\t2\n3)",
+        "rgb(1\r2\x0c3)",
+        "\n red \t",
+        "color(\tsrgb\n1 0 0 )",
+        "rgb(1 2 3\t/\n0.5)",
+    ] {
+        assert!(parse(good).is_some(), "{good:?}");
+    }
+    assert!(parse_profiled("color(\t--brand\n1 0 0 )").is_some());
+}
+
 #[test]
 fn the_arithmetic_is_css_colour_4s() {
     // CSS Color 4's sample code: P3 red in linear sRGB.
