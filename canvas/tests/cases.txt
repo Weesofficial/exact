@@ -242,6 +242,10 @@ fontStretch = "expanded"
 fontStretch = "wide"
 ? fontStretch => expanded
 
+## font quotes a family as Chrome does: a keyword's name in another case, a CSS-wide keyword, and a name that is not one identifier
+font = "12px 'Serif', 'Inherit', 'default', --a, '-1a', '-', 'Math', -webkit-body, 'Arial'"
+? font => 12px "Serif", "Inherit", "default", "--a", "-1a", "-", "Math", -webkit-body, Arial
+
 ## stage 2: letterSpacing and wordSpacing take lengths with units
 ? letterSpacing => 0px
 letterSpacing = "2px"

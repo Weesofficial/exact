@@ -147,9 +147,45 @@ impl Font {
     }
 }
 
+/// The keywords a lone family name may not be, so Chrome quotes it.
+const CSS_WIDE: [&str; 6] = [
+    "inherit",
+    "initial",
+    "unset",
+    "revert",
+    "revert-layer",
+    "default",
+];
+/// The generics Chrome's parser takes as keywords: a family of one of these
+/// names in another case was written quoted, and is written quoted.
+const KEYWORDS: [&str; 7] = [
+    "serif",
+    "sans-serif",
+    "monospace",
+    "cursive",
+    "fantasy",
+    "system-ui",
+    "math",
+];
+
+/// A family as Chrome writes it: bare when it is one identifier that is no
+/// keyword of the property, quoted otherwise (`"Arial Black"`, `"--a"`,
+/// `"-1a"`, `"Serif"`, `"inherit"`). A generic is stored lower-case, so a
+/// name that differs from one only in case was written quoted.
 fn quote_family(f: &str) -> String {
-    let plain = !f.is_empty()
-        && !f.starts_with(|c: char| c.is_ascii_digit())
+    let lower = f.to_ascii_lowercase();
+    let keyword =
+        CSS_WIDE.contains(&lower.as_str()) || (KEYWORDS.contains(&lower.as_str()) && f != lower);
+    let mut chars = f.chars();
+    let start = match chars.next() {
+        Some('-') => chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || !c.is_ascii()),
+        Some(c) => !c.is_ascii_digit(),
+        None => false,
+    };
+    let plain = !keyword
+        && start
         && f.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || !c.is_ascii());
     if plain {
@@ -600,6 +636,25 @@ pub fn prepare(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A family is bare only when it is one identifier and no keyword of the
+    /// property (headless Chrome, 2026-11-27).
+    #[test]
+    fn a_family_is_quoted_as_chrome_quotes_it() {
+        let s = |v: &str| parse(v).map(|f| f.serialize());
+        assert_eq!(s("12px 'Serif'").as_deref(), Some("12px \"Serif\""));
+        assert_eq!(s("12px SERIF").as_deref(), Some("12px serif"));
+        assert_eq!(s("12px 'inherit'").as_deref(), Some("12px \"inherit\""));
+        assert_eq!(
+            s("12px 'Revert-Layer'").as_deref(),
+            Some("12px \"Revert-Layer\"")
+        );
+        assert_eq!(s("12px --a").as_deref(), Some("12px \"--a\""));
+        assert_eq!(s("12px '-1a'").as_deref(), Some("12px \"-1a\""));
+        assert_eq!(s("12px '-'").as_deref(), Some("12px \"-\""));
+        assert_eq!(s("12px -a, _1, é").as_deref(), Some("12px -a, _1, é"));
+        assert_eq!(s("12px 'Arial'").as_deref(), Some("12px Arial"));
+    }
 
     #[test]
     fn the_shorthand_serialises_as_chrome_does() {

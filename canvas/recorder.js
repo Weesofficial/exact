@@ -336,7 +336,14 @@ export function parseFont(input) {
   f.families = fam;
   return f;
 }
-const quoteFamily = (f) => (f && !/^[0-9]/.test(f) && [...f].every((c) => /[A-Za-z0-9_-]/.test(c) || c.charCodeAt(0) > 127) ? f : `"${f.replace(/"/g, '\\"')}"`);
+// Bare when one identifier that is no keyword of the property, as Chrome writes it (canvas/src/font.rs `quote_family`).
+const FAMILY_KEYWORDS = ["inherit", "initial", "unset", "revert", "revert-layer", "default"], GENERIC_KEYWORDS = ["serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui", "math"];
+const quoteFamily = (f) => {
+  const ascii = f.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  const keyword = FAMILY_KEYWORDS.includes(ascii) || (GENERIC_KEYWORDS.includes(ascii) && f !== ascii);
+  const start = /^(-[A-Za-z_\u0080-\u{10ffff}]|[^0-9-])/u.test(f);
+  return !keyword && start && [...f].every((c) => /[A-Za-z0-9_-]/.test(c) || c.codePointAt(0) > 127) ? f : `"${f.replace(/"/g, '\\"')}"`;
+};
 /** Chrome's serialisation of a canvas font. */
 export function serializeFont(f) {
   let s = "";
