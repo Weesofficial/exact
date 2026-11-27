@@ -284,6 +284,18 @@ imageSmoothingQuality = "best"
 ? imageSmoothingEnabled => false
 ? imageSmoothingQuality => high
 
+## font reads family names as Chrome does: a string ends its token and may be unclosed, a name is identifiers
+font = "12px 'Open Sans"
+? font => 12px "Open Sans"
+font = "12px a inherit, default b"
+? font => 12px "a inherit", "default b"
+font = "12px a.b"
+? font => 12px "a inherit", "default b"
+font = "12px 'a'b"
+? font => 12px "a inherit", "default b"
+font = "12px serif font"
+? font => 12px "a inherit", "default b"
+
 ## stage 2: wide colours keep their own serialisation
 fillStyle = "lab(50% 40 59.5)"
 ? fillStyle => lab(50 40 59.5)

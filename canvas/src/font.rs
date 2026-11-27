@@ -191,7 +191,7 @@ fn quote_family(f: &str) -> String {
     if plain {
         f.to_string()
     } else {
-        format!("\"{}\"", f.replace('"', "\\\""))
+        format!("\"{}\"", f.replace('\\', "\\\\").replace('"', "\\\""))
     }
 }
 
@@ -203,14 +203,38 @@ fn tokens(s: &str) -> Option<Vec<String>> {
     while let Some(c) = chars.next() {
         match c {
             '"' | '\'' => {
+                // A string is a token of its own (`a"b"` and `"a"b` are not
+                // names); the end of the input closes it, and an escape keeps
+                // its backslash for [`unescape`] (CSS Syntax 3 §4.3.5).
+                if !cur.is_empty() {
+                    return None;
+                }
                 cur.push(c);
                 loop {
-                    let d = chars.next()?;
-                    cur.push(d);
-                    if d == c {
-                        break;
+                    match chars.next() {
+                        None => {
+                            cur.push(c);
+                            break;
+                        }
+                        Some('\\') => {
+                            cur.push('\\');
+                            cur.extend(chars.next());
+                        }
+                        Some(d) => {
+                            cur.push(d);
+                            if d == c {
+                                break;
+                            }
+                        }
                     }
                 }
+                if chars
+                    .peek()
+                    .is_some_and(|n| !n.is_whitespace() && !matches!(n, ',' | '/'))
+                {
+                    return None;
+                }
+                out.push(std::mem::take(&mut cur));
             }
             c if c.is_whitespace() => {
                 if !cur.is_empty() {
@@ -293,6 +317,65 @@ fn font_size(t: &str) -> Option<f64> {
     (v >= 0.0).then_some(v)
 }
 
+/// A string's or identifier's escapes resolved (CSS Syntax 3 §4.3.7): `\"`
+/// is `"`, `\62 ` is `b`, and an escaped newline or a backslash at the end is
+/// dropped.
+fn unescape(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let mut hex = 0u32;
+        let mut n = 0;
+        while n < 6 {
+            let Some(d) = it.peek().and_then(|d| d.to_digit(16)) else {
+                break;
+            };
+            hex = hex * 16 + d;
+            n += 1;
+            it.next();
+        }
+        if n == 0 {
+            if let Some(d) = it.next().filter(|d| *d != '\n') {
+                out.push(d);
+            }
+            continue;
+        }
+        if it.peek().is_some_and(|d| d.is_whitespace()) {
+            it.next();
+        }
+        out.push(
+            char::from_u32(hex)
+                .filter(|_| hex != 0)
+                .unwrap_or('\u{fffd}'),
+        );
+    }
+    out
+}
+
+/// One word of an unquoted family name, its escapes resolved: an identifier
+/// (CSS Syntax 3 §4.3.11), so not `a.b`, `3d`, `-1a` or `-`.
+fn ident(w: &str) -> Option<String> {
+    let b = w.as_bytes();
+    let start = match b.first()? {
+        b'-' => matches!(b.get(1), Some(c) if !c.is_ascii_digit()),
+        c => !c.is_ascii_digit(),
+    };
+    // Name characters, or an escape of any one character.
+    let mut it = w.chars();
+    let mut chars = true;
+    while let Some(c) = it.next() {
+        chars &= match c {
+            '\\' => it.next().is_some(),
+            c => c.is_ascii_alphanumeric() || matches!(c, '-' | '_') || !c.is_ascii(),
+        };
+    }
+    (start && chars).then(|| unescape(w))
+}
+
 fn families(toks: &[String]) -> Option<Vec<String>> {
     let mut out = Vec::new();
     let mut cur: Vec<&str> = Vec::new();
@@ -308,15 +391,33 @@ fn families(toks: &[String]) -> Option<Vec<String>> {
         if cur.is_empty() {
             return None;
         }
-        for w in cur.iter() {
-            if w.starts_with(|c: char| c.is_ascii_digit())
-                || ["inherit", "initial", "unset", "default", "revert"]
-                    .contains(&w.to_ascii_lowercase().as_str())
-            {
-                return None;
-            }
+        let words = cur.iter().map(|w| ident(w)).collect::<Option<Vec<_>>>()?;
+        let first = words[0].to_ascii_lowercase();
+        // A CSS-wide keyword or `default` is no name alone, and a generic
+        // keyword cannot start one (`serif font`), as Chrome reads them.
+        let lone = [
+            "inherit",
+            "initial",
+            "unset",
+            "revert",
+            "revert-layer",
+            "default",
+        ];
+        let generic = [
+            "serif",
+            "sans-serif",
+            "monospace",
+            "cursive",
+            "fantasy",
+            "system-ui",
+            "math",
+        ];
+        if (words.len() == 1 && lone.contains(&first.as_str()))
+            || (words.len() > 1 && generic.contains(&first.as_str()))
+        {
+            return None;
         }
-        let name = cur.join(" ");
+        let name = words.join(" ");
         let lower = name.to_ascii_lowercase();
         out.push(if GENERIC.contains(&lower.as_str()) {
             lower
@@ -335,7 +436,7 @@ fn families(toks: &[String]) -> Option<Vec<String>> {
             if !cur.is_empty() || quoted.is_some() || t.len() < 2 {
                 return None;
             }
-            quoted = Some(t[1..t.len() - 1].to_string());
+            quoted = Some(unescape(&t[1..t.len() - 1]));
             continue;
         }
         if quoted.is_some() || t == "/" {
@@ -345,6 +446,42 @@ fn families(toks: &[String]) -> Option<Vec<String>> {
     }
     finish(&mut cur, &mut quoted)?;
     Some(out)
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+
+    /// Family names as Chrome reads them (headless Chrome, 2026-11-27).
+    #[test]
+    fn family_names_are_read_as_chrome_reads_them() {
+        let f = |v: &str| parse(v).map(|f| f.families);
+        assert_eq!(f("12px 'a\\'b'"), Some(vec!["a'b".to_string()]));
+        assert_eq!(f("12px \"a\\\\b\""), Some(vec!["a\\b".to_string()]));
+        assert_eq!(f("12px 'Open Sans"), Some(vec!["Open Sans".to_string()]));
+        assert_eq!(f("12px a\\.b"), Some(vec!["a.b".to_string()]));
+        assert_eq!(f("12px a inherit"), Some(vec!["a inherit".to_string()]));
+        assert_eq!(f("12px x serif"), Some(vec!["x serif".to_string()]));
+        for bad in [
+            "12px a.b",
+            "12px a!b",
+            "12px 'a'b",
+            "12px a'b'",
+            "12px 'a' 'b'",
+            "12px -1a",
+            "12px -",
+            "12px inherit",
+            "12px revert-layer",
+            "12px serif font",
+            "12px Math x",
+        ] {
+            assert_eq!(f(bad), None, "{bad}");
+        }
+        assert_eq!(
+            parse("12px \"a\\\\b\"").unwrap().serialize(),
+            "12px \"a\\\\b\""
+        );
+    }
 }
 
 /// Parse the CSS `font` shorthand as a canvas `font` assignment does, or

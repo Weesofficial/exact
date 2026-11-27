@@ -272,7 +272,15 @@ function fontTokens(s) {
   const out = []; let cur = "";
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
-    if (c === '"' || c === "'") { const end = s.indexOf(c, i + 1); if (end < 0) return null; cur += s.slice(i, end + 1); i = end; }
+    if (c === '"' || c === "'") {
+      // A string is a token of its own; the input's end closes it; an escape keeps its backslash (canvas/src/font.rs `tokens`).
+      if (cur) return null;
+      let j = i + 1;
+      for (; j < s.length && s[j] !== c; j++) if (s[j] === "\\") j++;
+      cur = s.slice(i, Math.min(j, s.length)) + c; i = j;
+      if (i + 1 < s.length && !/[\s,/]/.test(s[i + 1])) return null;
+      out.push(cur); cur = "";
+    }
     else if (/\s/.test(c)) { if (cur) { out.push(cur); cur = ""; } }
     else if (c === "/" || c === ",") { if (cur) { out.push(cur); cur = ""; } out.push(c); }
     else cur += c;
@@ -280,18 +288,31 @@ function fontTokens(s) {
   if (cur) out.push(cur);
   return out;
 }
+// Escapes resolved (canvas/src/font.rs `unescape`).
+const unescapeCss = (t) => t.replace(/\\(?:([0-9a-fA-F]{1,6})\s?|([^]?))/g, (_, hex, ch) => {
+  if (hex === undefined) return ch === "\n" ? "" : ch;
+  const v = parseInt(hex, 16);
+  return v === 0 || v > 0x10ffff || (v >= 0xd800 && v < 0xe000) ? "\ufffd" : String.fromCodePoint(v);
+});
+// One word of an unquoted name: an identifier (canvas/src/font.rs `ident`).
+const identWord = (w) => (/^(-[^0-9]|[^0-9-])/.test(w) && /^(?:[A-Za-z0-9_\u0080-\u{10ffff}-]|\\[^])*$/u.test(w) ? unescapeCss(w) : null);
 function fontFamilies(toks) {
   const out = []; let cur = [], quoted = null;
   const finish = () => {
     if (quoted !== null) { if (cur.length) return false; out.push(quoted); quoted = null; return true; }
     if (!cur.length) return false;
-    for (const w of cur) if (/^[0-9]/.test(w) || ["inherit", "initial", "unset", "default", "revert"].includes(w.toLowerCase())) return false;
-    const name = cur.join(" "), lower = name.toLowerCase();
+    const words = cur.map(identWord);
+    if (words.includes(null)) return false;
+    // A CSS-wide keyword or `default` is no name alone, and a generic keyword cannot start one.
+    const first = words[0].toLowerCase();
+    if ((words.length === 1 && ["inherit", "initial", "unset", "revert", "revert-layer", "default"].includes(first))
+      || (words.length > 1 && ["serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui", "math"].includes(first))) return false;
+    const name = words.join(" "), lower = name.toLowerCase();
     out.push(GENERIC.includes(lower) ? lower : name); cur = []; return true;
   };
   for (const t of toks) {
     if (t === ",") { if (!finish()) return null; continue; }
-    if (t[0] === '"' || t[0] === "'") { if (cur.length || quoted !== null || t.length < 2) return null; quoted = t.slice(1, -1); continue; }
+    if (t[0] === '"' || t[0] === "'") { if (cur.length || quoted !== null || t.length < 2) return null; quoted = unescapeCss(t.slice(1, -1)); continue; }
     if (quoted !== null || t === "/") return null;
     cur.push(t);
   }
@@ -342,7 +363,7 @@ const quoteFamily = (f) => {
   const ascii = f.replace(/[A-Z]/g, (c) => c.toLowerCase());
   const keyword = FAMILY_KEYWORDS.includes(ascii) || (GENERIC_KEYWORDS.includes(ascii) && f !== ascii);
   const start = /^(-[A-Za-z_\u0080-\u{10ffff}]|[^0-9-])/u.test(f);
-  return !keyword && start && [...f].every((c) => /[A-Za-z0-9_-]/.test(c) || c.codePointAt(0) > 127) ? f : `"${f.replace(/"/g, '\\"')}"`;
+  return !keyword && start && [...f].every((c) => /[A-Za-z0-9_-]/.test(c) || c.codePointAt(0) > 127) ? f : `"${f.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 };
 /** Chrome's serialisation of a canvas font. */
 export function serializeFont(f) {
