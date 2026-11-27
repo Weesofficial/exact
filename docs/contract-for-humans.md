@@ -917,15 +917,19 @@ call outside them fails. The capabilities are:
 
 **What catches people.**
 
-- *A source cannot read the clock, repeat a timer or call `Math.random()`.*
-  `Date.now()`, `new Date()` without a value, `setInterval`,
-  `performance.now()` and `Math.random()` are refused when first used, on every
-  executor (`crypto.getRandomValues` and `crypto.randomUUID` work inside an answer); the type check cannot see it, and only `logs` shows the refusal. Time
-  and seeds are arguments: pass `performanceNow()` from the Contract (the
-  [data-module reference](reference.md#generate-typescript-data-source-types) has the full list).
-  An answer may wait with `setTimeout` or `AbortSignal.timeout`: the timer is
-  due on the app's clock, the agent's `clock +N` fires it, and it is cleared
-  when its answer gives its value.
+- *A source cannot repeat a timer, and ambient clocks skip bake.* `setInterval`,
+  `requestAnimationFrame` and `requestIdleCallback` are refused at build time
+  and on every executor; use a Contract `task` to repeat work. `Date.now()`,
+  `new Date()` without a value, `performance.now()` and `Math.random()` work
+  against the host's deterministic clock and seeded substream (CSPRNG in
+  production), alongside `crypto.getRandomValues` and `crypto.randomUUID`,
+  but a resource that calls them is excluded from launch bake and SSR caching
+  and logs `[ambient-clock]`. Pass `exactTime()` or `performanceNow()` from
+  Contract when the value should bake, cache or stay reactive (the
+  [data-module reference](reference.md#generate-typescript-data-source-types)
+  has the full rules). An answer may wait with `setTimeout` or
+  `AbortSignal.timeout`: the timer is due on the app's clock, the agent's
+  `clock +N` fires it, and it is cleared when its answer gives its value.
 - *There is no storage or network at build time.* The build bakes each
   resource's first value into the plan, and a storage or `native.call` then is refused
   with `code: 'bake'`. An uncaught refusal leaves the resource unbaked;

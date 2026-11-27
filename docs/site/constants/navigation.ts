@@ -138,7 +138,7 @@ export const sections: NavSection[] = [
       'porting-and-release': 'Name the port when you make it (exact new <path> --name and --bundle-id), then a release build and splitting the work.',
       'ports-and-browsers': 'The port that web, test web and agent web serve on, the Bun and Chrome the launchers use, and the stores a drive keeps or resets.',
       properties: 'In app.test.contract, state what should hold across the app\'s interactions.',
-      'random-and-shuffle': 'The data module refuses Math.random(): deal from exactTime()\'s seed, with a stream for each thing dealt.',
+      'random-and-shuffle': 'Deal from exactTime()\'s seed, with a stream for each thing dealt, so shuffles stay replayable and bakeable.',
       'responsive-columns': 'Columns side by side when wide and stacked on a phone: flex items that wrap at a minimum width, as in CSS.',
       'rest-backend': 'The REST starter creates a shared-list app and a Bun server.',
       'shipped-data': 'Data the app ships and only reads is a JSON file app.ts imports: it is bundled with the data module on every host, with no grant and no path to get wrong.',
