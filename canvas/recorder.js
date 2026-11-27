@@ -259,7 +259,8 @@ const DIRECTION = ["ltr", "rtl", "inherit"];
 const GENERIC = ["serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui", "ui-serif", "ui-sans-serif", "ui-monospace", "ui-rounded", "math", "emoji", "fangsong"];
 const BASE_SIZE = 10;
 const defaultFont = () => ({ style: 0, weight: 400, stretch: 100, caps: 0, size: 10, families: ["sans-serif"] });
-function fnum(t) { return /^[0-9.eE+-]+$/.test(t) && /[0-9]/.test(t) && Number.isFinite(Number(t)) ? Number(t) : null; }
+// A number as CSS Syntax 3 reads one (canvas/src/font.rs `num`): not `1.` or `1e`.
+function fnum(t) { return /^[+-]?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/.test(t) && Number.isFinite(Number(t)) ? Number(t) : null; }
 function lengthPx(t, pct) {
   t = t.toLowerCase();
   if (pct && t.endsWith("%")) { const v = fnum(t.slice(0, -1)); return v === null ? null : v * BASE_SIZE / 100; }
@@ -314,7 +315,7 @@ export function parseFont(input) {
     if (!variant && t === "small-caps") { variant = true; f.caps = 1; i++; continue; }
     if (!weight) {
       let w = t === "bold" || t === "bolder" ? 700 : t === "lighter" ? 100 : null;
-      if (w === null) { const v = fnum(t); if (v !== null && v >= 1 && v <= 1000 && !/[eE]/.test(t)) w = Math.round(v); }
+      if (w === null) { const v = fnum(t); if (v !== null && v >= 1 && v <= 1000) w = Math.trunc(v); }
       if (w !== null) { weight = true; f.weight = w; i++; continue; }
     }
     if (!stretch) { const k = STRETCH.find(([n]) => n === t); if (k) { stretch = true; f.stretch = k[1]; i++; continue; } }
@@ -322,7 +323,8 @@ export function parseFont(input) {
   }
   const st = toks[i]; if (st === undefined) return null;
   const KW = { "xx-small": 9, "x-small": 10, small: 13, medium: 16, large: 18, "x-large": 24, "xx-large": 32, "xxx-large": 48, larger: BASE_SIZE * 1.2, smaller: BASE_SIZE / 1.2 };
-  const size = KW[st.toLowerCase()] ?? lengthPx(st, true);
+  // A length needs a unit, except zero (CSS Values 4 §6.1).
+  const size = KW[st.toLowerCase()] ?? (fnum(st) === 0 ? 0 : lengthPx(st, true));
   if (size === null || size < 0) return null;
   f.size = size; i++;
   if (toks[i] === "/") {

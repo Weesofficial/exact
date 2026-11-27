@@ -255,6 +255,18 @@ letterSpacing = "bad"
 wordSpacing = "-1.5px"
 ? wordSpacing => -1.5px
 
+## font reads numbers as CSS does: a unitless 0, an exponent weight, a weight's fraction dropped, no trailing dot
+font = "0 serif"
+? font => 0px serif
+font = "1e2 12px serif"
+? font => 100 12px serif
+font = "500.6 12px serif"
+? font => 500 12px serif
+font = "1.px monospace"
+? font => 500 12px serif
+font = "12px/1. monospace"
+? font => 500 12px serif
+
 ## stage 2: shadows ignore invalid values
 ? shadowColor => rgba(0, 0, 0, 0)
 shadowColor = "red"
