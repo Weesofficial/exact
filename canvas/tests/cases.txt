@@ -353,6 +353,12 @@ fillText("X", 10, 60, Infinity)
 strokeText("X", 10, 60, Infinity)
 fillText("X", 10, 60, 100)
 
+## font holds its size to 10000px, as Chrome does
+font = "20000px serif"
+? font => 10000px serif
+font = "1e9px serif"
+? font => 10000px serif
+
 ## clip under a singular matrix is ignored, as Chrome ignores it
 beginPath()
 rect(0, 0, 10, 10)

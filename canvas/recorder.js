@@ -324,7 +324,7 @@ export function parseFont(input) {
   const KW = { "xx-small": 9, "x-small": 10, small: 13, medium: 16, large: 18, "x-large": 24, "xx-large": 32, "xxx-large": 48, larger: BASE_SIZE * 1.2, smaller: BASE_SIZE / 1.2 };
   const size = KW[st.toLowerCase()] ?? lengthPx(st, true);
   if (size === null || size < 0) return null;
-  f.size = size; i++;
+  f.size = Math.min(size, 10000); i++; // Chrome's largest font size (canvas/src/font.rs MAX_SIZE)
   if (toks[i] === "/") {
     const lh = toks[i + 1]; if (lh === undefined) return null;
     const l = lh.toLowerCase();

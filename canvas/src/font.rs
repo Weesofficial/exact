@@ -83,6 +83,10 @@ pub const GENERIC: [&str; 13] = [
 /// `smaller` on a canvas outside a document (LLP 1056 §8.2).
 pub const BASE_SIZE: f64 = 10.0;
 
+/// The largest size a font takes: Chrome holds a larger one to this, so it
+/// draws, measures and reads back at 10000px.
+pub const MAX_SIZE: f64 = 10000.0;
+
 /// A canvas font: the `font` shorthand's result, with `fontStretch` and
 /// `fontVariantCaps` (which the shorthand also sets) folded in.
 #[derive(Debug, Clone, PartialEq)]
@@ -377,7 +381,7 @@ pub fn parse(input: &str) -> Option<Font> {
         }
         break;
     }
-    font.size = font_size(toks.get(i)?)?;
+    font.size = font_size(toks.get(i)?)?.min(MAX_SIZE);
     i += 1;
     if toks.get(i).map(String::as_str) == Some("/") {
         let lh = toks.get(i + 1)?;
@@ -595,6 +599,26 @@ pub fn prepare(text: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    /// Chrome holds a font's size to 10000px (headless Chrome, 2026-11-27).
+    #[test]
+    fn a_size_is_held_to_ten_thousand_pixels() {
+        let size = |v: &str| parse(v).map(|f| f.size);
+        assert_eq!(size("20000px a"), Some(10000.0));
+        assert_eq!(size("1e9px a"), Some(10000.0));
+        assert_eq!(size("9999.5px a"), Some(9999.5));
+        assert_eq!(parse("20000px a").unwrap().serialize(), "10000px a");
+        // Measured, and so drawn, at the held size: the estimate is half an
+        // em a character.
+        let ctx = crate::Context2d::new();
+        ctx.set_font("20000px a");
+        assert_eq!(ctx.measure_text("ab").unwrap().width, 10000.0);
+    }
 }
 
 #[cfg(test)]
