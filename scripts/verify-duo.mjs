@@ -4,7 +4,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, resolve } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { simulator, simulators, withSoftwareKeyboard } from '../host/apple/devices.mjs';
 import { simulatorDisplay } from './agent-launch.mjs';
@@ -233,9 +233,11 @@ async function workerMain(argv) {
     const s = await open({ host: 'ios', app: cfg.appSelector, storage: 'verify-duo', env: { EXACT_AGENT_STORAGE_FRESH: '1' }, chrome: 'platform' });
     try { await s.clock('data'); await s.clock('settle'); await atScreen(s, FIRST); } finally { await s.close(); }
     for (const [i, file] of files.entries()) {
+      const rel = relative(cfg.appDir, file);
+      const label = rel && !rel.startsWith('..') && !isAbsolute(rel) ? rel : file;
       await runTests({ host: 'ios', file, app: cfg.appSelector, storage: `verify-duo${i}`, replayShots: resolve(cfg.shots, 'duo', String(i)), chrome: 'platform',
         atEnd: (t, { name, failures }) => atScreen(t, name, failures.length ? null : undefined),
-        atResult: (t) => atResult(t.failures.length ? { name: t.name, file: basename(file), index: t.index, failures: t.failures } : null) });
+        atResult: (t) => atResult(t.failures.length ? { name: t.name, file: label, index: t.index, failures: t.failures } : null) });
     }
   };
   const duo = await duoLeg({ pick: cfg.pick, check, drive, remembered: resolve(cfg.appDir, '.exact', 'simulator') });

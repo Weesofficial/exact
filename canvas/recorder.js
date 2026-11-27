@@ -69,17 +69,20 @@ function hexColor(hex) {
   if (hex.length === 6 || hex.length === 8) return [p(0), p(2), p(4), (hex.length === 8 ? p(6) : 255) / 255];
   return null;
 }
-function component(t) {
+// A component; an angle, in degrees, only where it is a hue (Chrome drops
+// `rgb(90deg 0 0)`; color/src/lib.rs `component`).
+function component(t, hue = false) {
   if (t === "none") return { num: 0 };
   if (t.endsWith("%")) { const v = number(t.slice(0, -1)); return v === null ? null : { pct: v }; }
   for (const [unit, per] of [["deg", 1], ["grad", 0.9], ["rad", 180 / Math.PI], ["turn", 360]]) {
-    if (t.endsWith(unit)) { const v = number(t.slice(0, -unit.length)); return v === null ? null : { num: v * per }; }
+    if (t.endsWith(unit)) { const v = hue ? number(t.slice(0, -unit.length)) : null; return v === null ? null : { num: v * per }; }
   }
   const v = number(t);
   return v === null ? null : { num: v };
 }
+// A number as CSS Syntax 3 reads one (§4.3.13): not `5.`, `1e` or `1.2.3`.
 function number(t) {
-  if (!t || !/^[0-9.eE+-]+$/.test(t)) return null;
+  if (!t || !/^[+-]?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/.test(t)) return null;
   const v = Number(t);
   return Number.isFinite(v) ? v : null;
 }
@@ -100,7 +103,8 @@ function functional(name, body) {
   let parts, alpha;
   if (legacy) {
     parts = body.split(",").map((p) => p.trim());
-    if (parts.some((p) => !p || p.includes(" ") || p.includes("/"))) return null;
+    // `none` is the space-separated syntax's alone (CSS Color 4 §4.1.2).
+    if (parts.some((p) => !p || p.includes(" ") || p.includes("/") || p === "none")) return null;
     if (parts.length === 4) alpha = parts.pop(); else if (parts.length !== 3) return null;
   } else {
     const [main, a] = body.includes("/") ? body.split("/") : [body, undefined];
@@ -109,7 +113,7 @@ function functional(name, body) {
     parts = main.trim().split(/\s+/);
     if (parts.length !== 3) return null;
   }
-  const c = parts.map(component);
+  const c = parts.map((p, i) => component(p, i === 0 && name !== "rgb" && name !== "rgba"));
   if (c.some((x) => !x)) return null;
   const a = alphaOf(alpha);
   if (a === null) return null;
@@ -174,7 +178,7 @@ function wide(name, body) {
   if (a !== undefined && !a.trim()) return undefined;
   const parts = main.trim().split(/\s+/);
   if (parts.length !== 3) return undefined;
-  const c = parts.map(component);
+  const c = parts.map((p, i) => component(p, i === 2 && (kind === 1 || kind === 3)));
   if (c.some((x) => !x)) return undefined;
   const pct = [[100, 125, 125], [100, 150, 0], [1, 0.4, 0.4], [1, 0.4, 0], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]][kind] ?? [1, 1, 1];
   const v = [];
@@ -203,7 +207,7 @@ function wide(name, body) {
   // A component written `none` is missing (CSS Color 4 §4.4): 0 in the pixels, `none` in the text.
   const shown = (t, n) => (t.trim() === "none" ? "none" : jsNumber(n));
   const alphaText = a !== undefined && a.trim() === "none" ? " / none" : alpha < 1 ? ` / ${jsNumber(alpha)}` : "";
-  out.text = `${space ? `color(${space} ` : `${name}(`}${v.map((n, i) => shown(parts[i], n)).join(" ")}${alphaText})`;
+  out.text = `${space ? `color(${space === "xyz" ? "xyz-d65" : space} ` : `${name}(`}${v.map((n, i) => shown(parts[i], n)).join(" ")}${alphaText})`;
   return out;
 }
 // A `display-p3` canvas's colours (LLP 1100 D12a; color/src/lib.rs
@@ -224,7 +228,8 @@ export function parseColor(input) {
   if (s.startsWith("#")) return hexColor(s.slice(1));
   const open = s.indexOf("(");
   if (open >= 0) {
-    if (!s.endsWith(")")) return null;
+    // No white space before a function's `(` (CSS Syntax 3 §4.3.4).
+    if (!s.endsWith(")") || /\s$/.test(s.slice(0, open))) return null;
     const w = wide(s.slice(0, open).trim(), s.slice(open + 1, -1));
     if (w !== null) return w ?? null;
     return functional(s.slice(0, open).trim(), s.slice(open + 1, -1));
@@ -259,7 +264,8 @@ const DIRECTION = ["ltr", "rtl", "inherit"];
 const GENERIC = ["serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui", "ui-serif", "ui-sans-serif", "ui-monospace", "ui-rounded", "math", "emoji", "fangsong"];
 const BASE_SIZE = 10;
 const defaultFont = () => ({ style: 0, weight: 400, stretch: 100, caps: 0, size: 10, families: ["sans-serif"] });
-function fnum(t) { return /^[0-9.eE+-]+$/.test(t) && /[0-9]/.test(t) && Number.isFinite(Number(t)) ? Number(t) : null; }
+// A number as CSS Syntax 3 reads one (canvas/src/font.rs `num`): not `1.` or `1e`.
+function fnum(t) { return /^[+-]?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/.test(t) && Number.isFinite(Number(t)) ? Number(t) : null; }
 function lengthPx(t, pct) {
   t = t.toLowerCase();
   if (pct && t.endsWith("%")) { const v = fnum(t.slice(0, -1)); return v === null ? null : v * BASE_SIZE / 100; }
@@ -335,7 +341,7 @@ export function parseFont(input) {
     if (!variant && t === "small-caps") { variant = true; f.caps = 1; i++; continue; }
     if (!weight) {
       let w = t === "bold" || t === "bolder" ? 700 : t === "lighter" ? 100 : null;
-      if (w === null) { const v = fnum(t); if (v !== null && v >= 1 && v <= 1000 && !/[eE]/.test(t)) w = Math.round(v); }
+      if (w === null) { const v = fnum(t); if (v !== null && v >= 1 && v <= 1000) w = Math.trunc(v); }
       if (w !== null) { weight = true; f.weight = w; i++; continue; }
     }
     if (!stretch) { const k = STRETCH.find(([n]) => n === t); if (k) { stretch = true; f.stretch = k[1]; i++; continue; } }
@@ -343,9 +349,10 @@ export function parseFont(input) {
   }
   const st = toks[i]; if (st === undefined) return null;
   const KW = { "xx-small": 9, "x-small": 10, small: 13, medium: 16, large: 18, "x-large": 24, "xx-large": 32, "xxx-large": 48, larger: BASE_SIZE * 1.2, smaller: BASE_SIZE / 1.2 };
-  const size = KW[st.toLowerCase()] ?? lengthPx(st, true);
+  // A length needs a unit, except zero (CSS Values 4 §6.1).
+  const size = KW[st.toLowerCase()] ?? (fnum(st) === 0 ? 0 : lengthPx(st, true));
   if (size === null || size < 0) return null;
-  f.size = size; i++;
+  f.size = Math.min(size, 10000); i++; // Chrome's largest font size (canvas/src/font.rs MAX_SIZE)
   if (toks[i] === "/") {
     const lh = toks[i + 1]; if (lh === undefined) return null;
     const l = lh.toLowerCase();
@@ -371,7 +378,8 @@ export function serializeFont(f) {
   if (f.style === 1) s += "italic ";
   if (f.weight === 700) s += "bold "; else if (f.weight !== 400) s += `${f.weight} `;
   if (f.caps === 1) s += "small-caps ";
-  return `${s}${jsNumber(f.size)}px ${f.families.map(quoteFamily).join(", ")}`;
+  // At most six significant digits, as Chrome writes a CSS number (canvas/src/font.rs `serialize`).
+  return `${s}${jsNumber(Number(f.size.toPrecision(6)))}px ${f.families.map(quoteFamily).join(", ")}`;
 }
 const prepareText = (t) => String(t).replace(/[\t\n\f\r]/g, " ");
 /** A run's metrics at left/alphabetic when no host engine is given (canvas/src/font.rs `Estimate`). */

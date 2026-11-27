@@ -767,3 +767,21 @@ fn gated_device_fact_is_lifted_per_instance_and_hoisted_refreshes_rewrite() {
     assert_eq!(expanded.root.mutations.len(), 1);
     assert_eq!(expanded.root.mutations[0].refreshes[0].0, "vp@Child");
 }
+
+#[test]
+fn child_task_gate_and_key_resolve_derives_read_nowhere_else() {
+    let parsed = crate::parse(
+        "component App\n  view\n    Child(open=true)\ncomponent Child\n  props\n    open: bool\n  state ticks = 0\n  derive under = ticks < 3\n  derive armed = open and under\n  derive tag = `${ticks}`\n  action tick\n    ticks = ticks + 1\n  task pulse when armed key=tag\n    after(1, tick)\n  view\n    text `${ticks}`\n",
+    )
+    .unwrap();
+    let names: BTreeSet<&str> = super::resolved_derives(&parsed.components[1])
+        .unwrap()
+        .into_iter()
+        .map(|(b, _)| b.name.as_str())
+        .collect();
+    assert_eq!(names, BTreeSet::from(["under", "armed", "tag"]));
+    let expanded = super::expand(&parsed).unwrap();
+    assert_eq!(expanded.root.tasks.len(), 1);
+    assert!(expanded.root.tasks[0].gate.is_some());
+    assert!(expanded.root.tasks[0].key.is_some());
+}

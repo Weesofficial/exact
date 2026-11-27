@@ -83,6 +83,10 @@ pub const GENERIC: [&str; 13] = [
 /// `smaller` on a canvas outside a document (LLP 1056 §8.2).
 pub const BASE_SIZE: f64 = 10.0;
 
+/// The largest size a font takes: Chrome holds a larger one to this, so it
+/// draws, measures and reads back at 10000px.
+pub const MAX_SIZE: f64 = 10000.0;
+
 /// A canvas font: the `font` shorthand's result, with `fontStretch` and
 /// `fontVariantCaps` (which the shorthand also sets) folded in.
 #[derive(Debug, Clone, PartialEq)]
@@ -118,7 +122,8 @@ impl Default for Font {
 impl Font {
     /// Chrome's serialisation: `[italic] [weight] [small-caps] <size>px
     /// <families>`, `bold` for 700, nothing for the defaults and for
-    /// `fontStretch` (Chrome omits it).
+    /// `fontStretch` (Chrome omits it). The size has at most six significant
+    /// digits, as Chrome writes a CSS number (`10pt` is `13.3333px`).
     pub fn serialize(&self) -> String {
         let mut s = String::new();
         if self.style == 1 {
@@ -134,7 +139,8 @@ impl Font {
         if self.caps == 1 {
             s.push_str("small-caps ");
         }
-        let _ = write!(s, "{}px ", exact_num::js(self.size));
+        let size: f64 = format!("{:.5e}", self.size).parse().unwrap_or(self.size);
+        let _ = write!(s, "{}px ", exact_num::js(size));
         let families: Vec<String> = self.families.iter().map(|f| quote_family(f)).collect();
         s.push_str(&families.join(", "));
         s
@@ -286,16 +292,40 @@ pub fn length_px(t: &str, allow_percent: bool) -> Option<f64> {
     None
 }
 
+/// A number as CSS Syntax 3 reads one (§4.3.13): a sign, digits, a `.` only
+/// before a digit, and an exponent of an `e` and digits, so not `1.` or `1e`.
 fn num(t: &str) -> Option<f64> {
-    let ok = !t.is_empty()
-        && t.bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'+' | b'e' | b'E'))
-        && t.bytes().any(|b| b.is_ascii_digit());
-    let v = if ok {
-        exact_num::parse_f64(t).ok()?
-    } else {
-        return None;
+    let b = t.as_bytes();
+    let mut i = usize::from(matches!(b.first(), Some(b'+' | b'-')));
+    let digits = |i: &mut usize| {
+        let start = *i;
+        while b.get(*i).is_some_and(u8::is_ascii_digit) {
+            *i += 1;
+        }
+        *i > start
     };
+    let whole = digits(&mut i);
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        if !digits(&mut i) {
+            return None;
+        }
+    } else if !whole {
+        return None;
+    }
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        i += 1;
+        if matches!(b.get(i), Some(b'+' | b'-')) {
+            i += 1;
+        }
+        if !digits(&mut i) {
+            return None;
+        }
+    }
+    if i != b.len() {
+        return None;
+    }
+    let v = exact_num::parse_f64(t).ok()?;
     v.is_finite().then_some(v)
 }
 
@@ -313,7 +343,9 @@ fn font_size(t: &str) -> Option<f64> {
         "smaller" => Some(BASE_SIZE / 1.2),
         _ => None,
     };
-    let v = keyword.or_else(|| length_px(t, true))?;
+    // A length needs a unit, except zero (CSS Values 4 §6.1).
+    let zero = num(t).filter(|v| *v == 0.0).map(|_| 0.0);
+    let v = keyword.or(zero).or_else(|| length_px(t, true))?;
     (v >= 0.0).then_some(v)
 }
 
@@ -529,9 +561,10 @@ pub fn parse(input: &str) -> Option<Font> {
             let w = match t.as_str() {
                 "bold" | "bolder" => Some(700),
                 "lighter" => Some(100),
+                // Chrome reads `1e2` as 100 and writes `500.6` as 500.
                 _ => num(&t)
-                    .filter(|v| (1.0..=1000.0).contains(v) && !t.contains(['e', 'E']))
-                    .map(|v| v.round() as u16),
+                    .filter(|v| (1.0..=1000.0).contains(v))
+                    .map(|v| v.trunc() as u16),
             };
             if let Some(w) = w {
                 weight = true;
@@ -550,7 +583,7 @@ pub fn parse(input: &str) -> Option<Font> {
         }
         break;
     }
-    font.size = font_size(toks.get(i)?)?;
+    font.size = font_size(toks.get(i)?)?.min(MAX_SIZE);
     i += 1;
     if toks.get(i).map(String::as_str) == Some("/") {
         let lh = toks.get(i + 1)?;
@@ -771,6 +804,26 @@ pub fn prepare(text: &str) -> String {
 }
 
 #[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    /// Chrome holds a font's size to 10000px (headless Chrome, 2026-11-27).
+    #[test]
+    fn a_size_is_held_to_ten_thousand_pixels() {
+        let size = |v: &str| parse(v).map(|f| f.size);
+        assert_eq!(size("20000px a"), Some(10000.0));
+        assert_eq!(size("1e9px a"), Some(10000.0));
+        assert_eq!(size("9999.5px a"), Some(9999.5));
+        assert_eq!(parse("20000px a").unwrap().serialize(), "10000px a");
+        // Measured, and so drawn, at the held size: the estimate is half an
+        // em a character.
+        let ctx = crate::Context2d::new();
+        ctx.set_font("20000px a");
+        assert_eq!(ctx.measure_text("ab").unwrap().width, 10000.0);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -832,6 +885,19 @@ mod tests {
         assert_eq!(parse("condensed 12px a").unwrap().stretch, 75.0);
     }
 
+    /// Chrome writes the size as a CSS number, six significant digits at
+    /// most (headless Chrome, 2026-11-26); the font keeps the exact size.
+    #[test]
+    fn the_size_serialises_with_six_significant_digits() {
+        let s = |v: &str| parse(v).map(|f| f.serialize());
+        assert_eq!(s("10pt a").as_deref(), Some("13.3333px a"));
+        assert_eq!(s("smaller a").as_deref(), Some("8.33333px a"));
+        assert_eq!(s("12.3456789px a").as_deref(), Some("12.3457px a"));
+        assert_eq!(s("12.000001px a").as_deref(), Some("12px a"));
+        assert_eq!(s("0px a").as_deref(), Some("0px a"));
+        assert!((parse("10pt a").unwrap().size - 40.0 / 3.0).abs() < 1e-12);
+    }
+
     #[test]
     fn metrics_follow_chrome_for_top_and_center() {
         // Chrome's 10px sans-serif on this Mac, "Hi there".
@@ -854,5 +920,23 @@ mod tests {
         assert!((m.hanging_baseline + 0.15625).abs() < 1e-9);
         assert!((m.ideographic_baseline + 10.15625).abs() < 1e-9);
         assert!((m.actual_bounding_box_right - (24.080078125 - 23.0146484375 / 2.0)).abs() < 1e-9);
+    }
+
+    /// Numbers as CSS reads them (headless Chrome, 2026-11-27): a unitless
+    /// zero is a size, a weight may have an exponent and loses its fraction,
+    /// and `1.` is not a number.
+    #[test]
+    fn the_shorthand_reads_numbers_as_css_does() {
+        let s = |v: &str| parse(v).map(|f| f.serialize());
+        assert_eq!(s("0 serif").as_deref(), Some("0px serif"));
+        assert_eq!(s("-0 serif").as_deref(), Some("0px serif"));
+        assert_eq!(s("1e2 12px a").as_deref(), Some("100 12px a"));
+        assert_eq!(s("1E+2 12px a").as_deref(), Some("100 12px a"));
+        assert_eq!(s("500.6 12px a").as_deref(), Some("500 12px a"));
+        assert_eq!(s("999.9 12px a").as_deref(), Some("999 12px a"));
+        assert_eq!(s("1.px a"), None);
+        assert_eq!(s("100. 12px a"), None);
+        assert_eq!(s("12px/1. a"), None);
+        assert_eq!(s("0 0 a"), None);
     }
 }

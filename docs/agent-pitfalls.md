@@ -1147,24 +1147,27 @@ price: answers arrive `Later`, outside the action's transaction (LLP 1027.002 D1
   `await`, and catch the failure ([recipe](recipes/report-errors.md)).
   (Scratch app under `agent macos` and `agent web`, 2026-11-14.)
 
-- **`Date.now()` in a data module passes its Bun tests and fails on the
-  device.** Since 2026-10-05 the build refuses a direct use by file and line
-  (`Date.now()`, `new Date()`, `Math.random()`, `setInterval` and the frame
-  timers; an answer's own `setTimeout` is allowed since 2026-10-28), including literal
-  bracket access such as `Date['now']()`. An alias or dynamic key still gets
-  past the build and throws on first use on every host but Bun. Take the time
-  from the call's arguments (the Contract's `wallTime.epochAtZero + performanceNow()`), as
-  every source already receives it. (Signal clone build 34, 2026-10-05.)
+- **Repeating timers fail in data modules; ambient clocks skip bake.**
+  The build refuses direct and literal-bracket calls to `setInterval`,
+  `requestAnimationFrame`, and `requestIdleCallback` by file and line, and
+  every executor refuses them at runtime (use `setTimeout` inside an answer or
+  a Contract `task`). `Date.now()`, `new Date()`, `performance.now()`, and
+  `Math.random()` work against the host's deterministic clock and seeded
+  substream (LLP 1195.000 D2), but exclude the resource from launch bake and
+  SSR caching and log `[ambient-clock]`. Pass `exactTime()` or
+  `performanceNow()` from Contract for reactive, baked, or SSR-cached values;
+  under Bun unit tests, pass `--preload ./scripts/test-clock-preload.mjs`.
 
-- **An npm package builds, then stops the page at boot.** The build names a
-  clock or randomness read in the app's own modules by file and line; a
-  package's is found only when it runs. `convex`'s `ConvexHttpClient` builds
-  and throws `Math.random() is unavailable in data sources` from its default
-  logger's constructor, so the page never boots: construct it with `{ logger:
-  false }`. Its reactive client (`ConvexClient`, `BaseConvexClient`) also
-  opens its own socket and arms timers no answer owns: use `@exact/convex`
-  (`bun exact.mjs docs convex live queries`). Drive a new package once (`agent web "clock
-  data" logs`) before building on it. (LLP 1157 §1, 2026-11-10.)
+- **An npm package builds, then fails at runtime on sockets or repeating timers.**
+  The build checks the app's own modules for forbidden timers; a package's use
+  of sockets, repeating timers, or browser globals may only surface when it
+  runs. `convex`'s reactive client (`ConvexClient`, `BaseConvexClient`) opens
+  its own socket and arms timers no answer owns: use `@exact/convex`
+  (`bun exact.mjs docs convex live queries`). For `ConvexHttpClient`, pass
+  `{ logger: false }` so its default logger does not draw ambient
+  `Math.random()` and exclude the resource from launch bake and SSR caching.
+  Drive a new package once (`agent web "clock data" logs`) before building on
+  it. (LLP 1157 §1, 2026-11-10.)
 
 - **A drive against a real Convex deployment: the second launch's
   writes do nothing.** A mutation replies ok and the data does not change.
@@ -2618,7 +2621,8 @@ once, then reports it again only after its valid bindings disappear and return. 
   triggering the notification path.
 
 - **Live clocks cannot feed a `resource` argument directly.** Passing `performanceNow()`
-  into a `resource` argument re-requests data every frame (`analyze-resource-clock`), and
-  `Date.now()` is refused inside `app.ts`. Sample the current timestamp or day key into
+  into a `resource` argument re-requests data every frame (`analyze-resource-clock`), while
+  reading `Date.now()` inside `app.ts` does not trigger reactive updates and excludes the
+  resource from launch bake and SSR caching. Sample the current timestamp or day key into
   `state` inside an action or timer task (`task` `every(...)`), then pass that state to
   the `resource`.

@@ -22,9 +22,10 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_DERIVE_DEPTH: usize = 100;
 const MAX_DERIVE_NODES: usize = 4_096;
 
-/// The derives reachable from `c`'s view, states, or actions, each with
-/// its resolved expression. Dependencies also remain available to lowering
-/// as shared bodies when nothing outside another derive reads them.
+/// The derives reachable from `c`'s view, states, provides, actions,
+/// resources, or tasks, each with its resolved expression. Dependencies also
+/// remain available to lowering as shared bodies when nothing outside another
+/// derive reads them.
 pub fn resolved_derives(c: &Component) -> Result<Vec<(&Binding, Expr)>, SyntaxError> {
     let mut indices = BTreeMap::new();
     for (i, derive) in c.derives.iter().enumerate() {
@@ -473,8 +474,8 @@ fn dependencies(expr: &Expr, indices: &BTreeMap<&str, usize>, out: &mut BTreeSet
         .for_each(|child| dependencies(child, indices, out));
 }
 
-/// Every name written in the component's view, states and actions: the
-/// derives any of them may read.
+/// Every name written outside `c`'s derives: the derives any of its view,
+/// states, provides, actions, resources, or tasks may read.
 fn read_outside_derives(c: &Component) -> BTreeSet<&str> {
     fn expr<'a>(e: &'a Expr, out: &mut BTreeSet<&'a str>) {
         if let Expr::Ident(name, _) | Expr::Call(name, _, _) = e {
@@ -530,9 +531,18 @@ fn read_outside_derives(c: &Component) -> BTreeSet<&str> {
     for a in &c.actions {
         stmts(&a.body, &mut out);
     }
-    // A child's own request reads its derives (LLP 1035.005.004 D1).
+    // A child's own requests and tasks read its derives (LLP 1035.005.004 D1).
     for r in &c.resources {
         r.args.iter().chain(&r.gate).for_each(|e| expr(e, &mut out));
+        if let Some(each) = &r.each {
+            expr(&each.list, &mut out);
+            if let Some(key) = &each.key {
+                expr(key, &mut out);
+            }
+        }
+    }
+    for t in &c.tasks {
+        t.gate.iter().chain(&t.key).for_each(|e| expr(e, &mut out));
     }
     out
 }

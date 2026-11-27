@@ -2278,8 +2278,9 @@ out (LLP 1157).
 - **Hosts.** The web, macOS, iOS, Linux and Windows. A worker-placed source
   and any other host have no socket to send on. There, and for a read that
   need not be live, use Convex's HTTP client under `net.fetch`: `new
-  ConvexHttpClient(CONVEX, { logger: false })` from `convex/browser` (its
-  default logger calls `Math.random()`, which a data module refuses), then
+  ConvexHttpClient(CONVEX, { logger: false })` from `convex/browser` (`{ logger:
+  false }` avoids its default logger drawing ambient `Math.random()`, which
+  excludes the resource from launch bake and SSR caching), then
   `await http.query(api.messages.list, { channel })`.
 
 #### Convex Auth
@@ -2555,11 +2556,9 @@ if (!res.ok) throw new Error((await res.json()).message);
 - **`@supabase/auth-js`, and so `@supabase/supabase-js`.** The build refuses
   both for their uses of the DOM's and Node's globals: the Auth client reads
   `window`, `location`, `localStorage` and `navigator.locks` on browser-only
-  paths, and Realtime's socket factory reads `process`. With that refusal
-  lifted, Auth still fails: each session call reads `Date.now()`, which every
-  executor refuses (LLP 1027.000). The umbrella client with `accessToken`
-  would serve tables, Storage and Functions, at 403 KB of web JavaScript to
-  these three packages' 92 KB.
+  paths, and Realtime's socket factory reads `process`. The umbrella client
+  with `accessToken` would serve tables, Storage and Functions, at 403 KB of
+  web JavaScript to these three packages' 92 KB.
 - **Realtime.** Its socket outlives an answer; `QUEUE.md`, "A stream that can
   send: Supabase Realtime without polling".
 

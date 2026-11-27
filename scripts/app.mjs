@@ -533,11 +533,11 @@ export function resolveApp(nameOrCrate, { useOutput = true } = {}) {
 /** Android's store identity (LLP 1030 D2); the shared id remains the default. */
 export const androidPackageId = manifest => (manifest.host?.android?.id ?? manifest.app.id).replaceAll('-', '_');
 
-/** An app's authored tests (LLP 1017 P7), the files that exist: `app.test.contract`, then every other `*.test.contract`
- * beside it in name order (an app's tests split by area under the line cap). `test`, `verify` and the smoke run these. */
+/** An app's authored tests (LLP 1017 P7): `app.test.contract`, other root `*.test.contract`, then `tests/*.test.contract`. */
 export function authoredTests(dir) {
   const others = readdirSync(dir).filter((n) => n.endsWith('.test.contract') && n !== 'app.test.contract').sort();
-  return [...(existsSync(resolve(dir, 'app.test.contract')) ? ['app.test.contract'] : []), ...others].map((n) => resolve(dir, n));
+  const sub = resolve(dir, 'tests'), nested = existsSync(sub) && statSync(sub).isDirectory() ? readdirSync(sub).filter((n) => n.endsWith('.test.contract')).sort().map((n) => resolve(sub, n)) : [];
+  return [...(existsSync(resolve(dir, 'app.test.contract')) ? ['app.test.contract'] : []), ...others].map((n) => resolve(dir, n)).concat(nested);
 }
 
 /** app.json's text as JSON. A byte-order mark, which some Windows editors write and JSON does not allow, is named

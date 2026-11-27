@@ -46,11 +46,12 @@ import { LAUNCH_MEDIA } from './agent-prefer.mjs';
 import { toolEnv } from './tools.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { availableParallelism, loadavg, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { findings as feelFindings, summary as feelSummary } from '../host/apple/feel/analyze.mjs';
+import { authoredTests } from './app.mjs';
 import { compilerWarnings, information, oneScheme, shippedHost, windowsWindow } from './app-cli.mjs';
 import { guardFlags } from './help.mjs';
 import { holderOf } from './port-lock.mjs';
@@ -597,9 +598,14 @@ export const testEnd = (host, shots, persisted, capture = true, { baseline = nul
  * as a compile error, or no simulator chosen); `{ none }` without a file. A test is numbered by its place in `results`,
  * so its captures' names are its own across the files, and each file after the first runs under a storage name of its
  * own, so a store one file's test left is not another's. */
+/** Display and replay key for a test file: relative to `appDir` when inside it, else the full path. */
+const testLabel = (appDir, file) => {
+  const rel = relative(appDir, file);
+  return rel && !rel.startsWith('..') && !isAbsolute(rel) ? rel : file;
+};
 /** Resolve optional `.test.contract` file paths or globs for `verify [host] [file ...]`. */
 export function selectVerifyFiles(appDir, specs, all = null) {
-  const totalFiles = all ?? authoredTestsSync(appDir);
+  const totalFiles = all ?? authoredTests(appDir);
   if (!specs?.length) return { files: totalFiles, partial: null };
   const selected = [];
   for (const spec of specs) {
@@ -614,20 +620,16 @@ export function selectVerifyFiles(appDir, specs, all = null) {
     if (!found.length) throw new Error(`no test file matches ${spec}`);
     for (const file of found) if (!selected.includes(file)) selected.push(file);
   }
-  return { files: selected, partial: { selected: selected.length, total: totalFiles.length } };
+  return { files: selected, partial: { selected: selected.length, total: new Set([...totalFiles, ...selected]).size } };
 }
-const authoredTestsSync = (dir) => {
-  const others = readdirSync(dir).filter((n) => n.endsWith('.test.contract') && n !== 'app.test.contract').sort();
-  return [...(existsSync(resolve(dir, 'app.test.contract')) ? ['app.test.contract'] : []), ...others].map((n) => resolve(dir, n));
-};
 
 async function tests(host, app, shots, running, selectedFiles = null, { baseline = null } = {}) {
-  const [{ runTests }, { authoredTests }] = await Promise.all([import('./agent-test.mjs'), import('./app.mjs')]);
+  const { runTests } = await import('./agent-test.mjs');
   const persisted = persistedStates(app.dir), files = selectedFiles ?? authoredTests(app.dir);
   if (!files.length) return { none: true };
   const atEnd = testEnd(host, shots, persisted, true, { baseline }), out = { passed: 0, failed: 0, results: [] }, errors = [];
   for (const [i, file] of files.entries()) {
-    const first = out.results.length;
+    const first = out.results.length, label = testLabel(app.dir, file);
     const started = new Map();
     let fileStart = Date.now();
     try {
@@ -647,8 +649,8 @@ async function tests(host, app, shots, running, selectedFiles = null, { baseline
       });
       out.passed += r.passed; out.failed += r.failed;
       // A failure the test did not arrange is a finding (LLP 1146 D4): `runTests` says it in a note.
-      out.results.push(...r.results.map(({ name, index, failures, notes = [], end, store, shots }) => ({ name, index, file: basename(file), failures, unarranged: notes.filter((n) => n.startsWith('unarranged: ')).map((n) => n.slice(12)), ...(shots ? { shots } : {}), ...(end ? { end } : {}), ...(store ? { store } : {}) })));
-    } catch (e) { errors.push(files.length > 1 ? `${basename(file)}: ${e.message}` : e.message); }
+      out.results.push(...r.results.map(({ name, index, failures, notes = [], end, store, shots }) => ({ name, index, file: label, failures, unarranged: notes.filter((n) => n.startsWith('unarranged: ')).map((n) => n.slice(12)), ...(shots ? { shots } : {}), ...(end ? { end } : {}), ...(store ? { store } : {}) })));
+    } catch (e) { errors.push(files.length > 1 ? `${label}: ${e.message}` : e.message); }
   }
   return errors.length ? { ...out, error: errors.join('\n') } : out;
 }
@@ -710,9 +712,10 @@ async function onDuo(app, { pick, shots, running, freshServer, passed, selectedF
     try { await s.clock('data'); await s.clock('settle'); await atScreen(s, FIRST); } finally { await s.close(); }
     if (running) await freshServer();
     for (const [i, file] of files.entries()) {
+      const label = testLabel(app.dir, file);
       await runTests({ host: 'ios', file, app: app.selector, running, storage: `verify-duo${i}`, replayShots: resolve(shots, 'duo', String(i)), ...hostOpen('ios', app),
         atEnd: (t, { name, failures }) => atScreen(t, name, failures.length ? null : undefined),
-        atResult: (t) => atResult(t.failures.length && passed.has(`${basename(file)} ${t.index}`) ? { name: t.name, file: basename(file), failures: t.failures } : null) });
+        atResult: (t) => atResult(t.failures.length && passed.has(`${label} ${t.index}`) ? { name: t.name, file: label, failures: t.failures } : null) });
     }
   };
   return duoLeg({ pick, check, drive, remembered: resolve(app.dir, '.exact', 'simulator') });

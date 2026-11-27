@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createApp, applyPattern } from '../game/new.mjs';
 import { chromium } from './agent-launch.mjs';
@@ -84,6 +84,19 @@ test('selectVerifyFiles and partial report mark filtered verify runs distinctly 
     const summary = report({ host: 'web', tested: { passed: 1, failed: 0, results: [] }, checks: [], shots: [], ms: 1200, partial: picked.partial });
     expect(summary.lines.at(-1)).toBe('verify (partial: 1/2 test files): clean in 1.2 s');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+  const testsOnly = mkdtempSync(resolve(import.meta.dir, '../target/verify-tests-dir-'));
+  try {
+    mkdirSync(resolve(testsOnly, 'tests'));
+    mkdirSync(resolve(testsOnly, 'other'));
+    writeFileSync(resolve(testsOnly, 'tests/greeting.test.contract'), 'test "a"\n  expect tree has "x"\n');
+    writeFileSync(resolve(testsOnly, 'other/extra.test.contract'), 'test "b"\n  expect tree has "x"\n');
+    expect(selectVerifyFiles(testsOnly, [])).toEqual({
+      files: [resolve(testsOnly, 'tests/greeting.test.contract')],
+      partial: null,
+    });
+    expect(selectVerifyFiles(testsOnly, ['tests/greeting.test.contract']).partial).toEqual({ selected: 1, total: 1 });
+    expect(selectVerifyFiles(testsOnly, ['other/extra.test.contract']).partial).toEqual({ selected: 1, total: 2 });
+  } finally { rmSync(testsOnly, { recursive: true, force: true }); }
 });
 
 test('linuxDevStaleChanges exempts Contract and TypeScript files only when --url is set (LLP 1156.008.000 D9.4)', () => {
