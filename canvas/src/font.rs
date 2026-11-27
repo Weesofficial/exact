@@ -118,7 +118,8 @@ impl Default for Font {
 impl Font {
     /// Chrome's serialisation: `[italic] [weight] [small-caps] <size>px
     /// <families>`, `bold` for 700, nothing for the defaults and for
-    /// `fontStretch` (Chrome omits it).
+    /// `fontStretch` (Chrome omits it). The size has at most six significant
+    /// digits, as Chrome writes a CSS number (`10pt` is `13.3333px`).
     pub fn serialize(&self) -> String {
         let mut s = String::new();
         if self.style == 1 {
@@ -134,7 +135,8 @@ impl Font {
         if self.caps == 1 {
             s.push_str("small-caps ");
         }
-        let _ = write!(s, "{}px ", exact_num::js(self.size));
+        let size: f64 = format!("{:.5e}", self.size).parse().unwrap_or(self.size);
+        let _ = write!(s, "{}px ", exact_num::js(size));
         let families: Vec<String> = self.families.iter().map(|f| quote_family(f)).collect();
         s.push_str(&families.join(", "));
         s
@@ -638,6 +640,19 @@ mod tests {
             Some("italic 12px \"My Font\"")
         );
         assert_eq!(parse("condensed 12px a").unwrap().stretch, 75.0);
+    }
+
+    /// Chrome writes the size as a CSS number, six significant digits at
+    /// most (headless Chrome, 2026-11-26); the font keeps the exact size.
+    #[test]
+    fn the_size_serialises_with_six_significant_digits() {
+        let s = |v: &str| parse(v).map(|f| f.serialize());
+        assert_eq!(s("10pt a").as_deref(), Some("13.3333px a"));
+        assert_eq!(s("smaller a").as_deref(), Some("8.33333px a"));
+        assert_eq!(s("12.3456789px a").as_deref(), Some("12.3457px a"));
+        assert_eq!(s("12.000001px a").as_deref(), Some("12px a"));
+        assert_eq!(s("0px a").as_deref(), Some("0px a"));
+        assert!((parse("10pt a").unwrap().size - 40.0 / 3.0).abs() < 1e-12);
     }
 
     #[test]

@@ -217,6 +217,18 @@ fontVariantCaps = "small-caps"
 font = "bold 12px serif"
 ? fontVariantCaps => normal
 
+## font writes its size with at most six significant digits, as Chrome does
+font = "10pt serif"
+? font => 13.3333px serif
+font = "smaller serif"
+? font => 8.33333px serif
+font = "12.3456789px serif"
+? font => 12.3457px serif
+font = "2cm serif"
+? font => 75.5906px serif
+font = "12.5px serif"
+? font => 12.5px serif
+
 ## stage 2: the text attributes ignore unknown values
 ? textAlign => start
 textAlign = "center"

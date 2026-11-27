@@ -343,7 +343,8 @@ export function serializeFont(f) {
   if (f.style === 1) s += "italic ";
   if (f.weight === 700) s += "bold "; else if (f.weight !== 400) s += `${f.weight} `;
   if (f.caps === 1) s += "small-caps ";
-  return `${s}${jsNumber(f.size)}px ${f.families.map(quoteFamily).join(", ")}`;
+  // At most six significant digits, as Chrome writes a CSS number (canvas/src/font.rs `serialize`).
+  return `${s}${jsNumber(Number(f.size.toPrecision(6)))}px ${f.families.map(quoteFamily).join(", ")}`;
 }
 const prepareText = (t) => String(t).replace(/[\t\n\f\r]/g, " ");
 /** A run's metrics at left/alphabetic when no host engine is given (canvas/src/font.rs `Estimate`). */
