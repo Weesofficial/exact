@@ -956,15 +956,17 @@ fn one(name: impl Into<String>, unit: impl Into<String>) -> Vec<Write> {
     }]
 }
 
-/// A blank's declarations come from the wasm serializer, including companion
-/// properties. A property absent here keeps its map's internal absence rule.
-pub(super) fn clear_css(id: StyleId, press: bool) -> String {
+/// A blank's declarations come from the wasm serializer, including companion properties.
+pub(super) fn clear_css(id: StyleId, press: bool, has_press: bool) -> String {
     let mut style = exact_kernel::StyleProps::default();
     style.written.set(id);
-    if press {
-        style
-            .set_dynamic(StyleId::PressScale, &exact_kernel::StyleValue::Number(0.9))
-            .expect("a press scale");
+    if let Some((row, val)) = match (id, press, has_press) {
+        (i, true, _) if i != StyleId::PressScale => Some((StyleId::PressScale, 0.9)),
+        (StyleId::Transition, _, true) => Some((StyleId::PressOpacity, 0.5)),
+        _ => None,
+    } {
+        let v = exact_kernel::StyleValue::Number(val);
+        style.set_dynamic(row, &v).expect("a press row");
     }
     exact_web::css::css_text(&style, &[]).0
 }

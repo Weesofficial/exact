@@ -116,9 +116,19 @@ impl Em<'_> {
         if !self.paint || kind.is_svg_element() || kind.is_metadata() {
             return;
         }
-        if let Some((name, value)) = crate::paint::binding(self.plan, kind, b, |parser| {
-            parser.emit(self.plan, &mut self.uses)
-        }) {
+        let needs_props = b.kind == BindingKind::Style
+            && b.id == StyleId::PressScale as u16
+            && self.plan.theme.iter().any(|r| r.kind == 2);
+        let props: Option<&[(String, String)]> = if needs_props {
+            Some(self.answers.properties())
+        } else {
+            Some(&[])
+        };
+        if let Some((name, value)) =
+            crate::paint::binding_with_props(self.plan, kind, b, props, |parser| {
+                parser.emit(self.plan, &mut self.uses)
+            })
+        {
             let f = if b.kind == BindingKind::Style && b.id == StyleId::BackdropFilter as u16 {
                 format!("()=>{}(({f})(),false)", self.uses.rt("backdropValue"))
             } else {
@@ -176,6 +186,9 @@ impl Em<'_> {
         let press = parts.css.contains("--exact-press:")
             || binding(StyleId::PressScale)
                 .is_some_and(|b| style::literal(plan, plan.code(b.expr)).is_none());
+        let has_press = exact_web::css::PRESS_ROWS
+            .iter()
+            .any(|(id, _)| binding(*id).is_some());
         // A clock (LLP 1055.002) plays on the page's timeline: only a non-clock
         // timeline needs `after_shorthand` and (with drag timelines) pausing.
         // Dynamic expressions (e.g. a state variable) have no literal value and
@@ -433,11 +446,20 @@ impl Em<'_> {
                     StyleId::PressBackgroundColor => "--exact-press-background-color",
                     _ => "--exact-press-color",
                 };
-                let none = "v==null||/^\\s*unset\\s*$/i.test(v)?null:";
-                one(name, Some(match &cm {
-                    Some(cm) => format!("v=>{none}{cm}(v)"),
-                    None => format!("v=>{none}v"),
-                }))
+                let numeric = matches!(id, StyleId::PressOpacity | StyleId::PressOpacityTo);
+                let check = format!(
+                    "v=>{{if(v==null)return null;const r={};if(r==null)return null;const t=String(r).trim();if(!t||/^(?:unset|initial|inherit|revert|revert-layer)$/i.test(t))return null;{}return r}}",
+                    match &cm {
+                        Some(cm) => format!("{cm}(v)"),
+                        None => "v".to_string(),
+                    },
+                    if numeric {
+                        "if(!Number.isFinite(Number(t))&&!/^(?:[+-]?(?:\\d+\\.?\\d*|\\.\\d+)%|(?:var|calc)\\()/i.test(t))return null;"
+                    } else {
+                        ""
+                    }
+                );
+                one(name, Some(check))
             }
             // @ref LLP 1116.001 D1.4, LLP 1077 D12 — what navigation.js `fitText` and
             // `playSymbolEffects` read, inline.
@@ -456,12 +478,13 @@ impl Em<'_> {
                 }
                 let press = self.uses.rt("pressFeedback");
                 let _ = write!(self.out, "{press}();");
+                let invalid = "v==null||!String(v).trim()||/^\\s*(?:unset|initial|inherit|revert|revert-layer)\\s*$/i.test(String(v))||(Number.isFinite(Number(v))?Number(v)===1:!/^\\s*(?:var|calc)\\(/i.test(String(v)))";
                 vec![
-                    ("--exact-press".into(), String::new(), Some("v=>v==null||v===1||/^\\s*unset\\s*$/i.test(v)?null:v".into())),
+                    ("--exact-press".into(), String::new(), Some(format!("v=>{invalid}?null:v"))),
                     (
                         "scale".into(),
                         String::new(),
-                        Some("v=>v==null||v===1||/^\\s*unset\\s*$/i.test(v)?null:\"calc(var(--exact-scale,1) * var(--exact-press-factor,1)) calc(var(--exact-scale-y,1) * var(--exact-press-factor,1))\"".into()),
+                        Some(format!("v=>{invalid}?null:\"calc(var(--exact-scale,1) * var(--exact-press-factor,1)) calc(var(--exact-scale-y,1) * var(--exact-press-factor,1))\"")),
                     ),
                 ]
             }
@@ -532,7 +555,7 @@ impl Em<'_> {
                 let spring = self.uses.constant("$transitionSpring", style::transition_spring);
                 let entries = self.uses.constant("$transitionEntries", || style::transition_entries(&spring));
                 let mut writes = one("transition", Some(self.uses.share('m', style::transition_map(&entries, press, shift))));
-                if exact_web::css::PRESS_ROWS.iter().any(|(id, _)| binding(*id).is_some()) {
+                if has_press {
                     let parser = crate::paint::Parser::Transition.emit(plan, &mut self.uses);
                     let map = crate::paint::press_timing_map(&parser, &spring, b.written);
                     writes.extend(one("--exact-press-timing", Some(self.uses.share('m', map))));
@@ -697,7 +720,7 @@ impl Em<'_> {
             format!("()=>{{const v=({f})();return typeof v===\"string\"&&!v.trim()?\"unset\":v}}")
         });
         let f = clear.as_deref().unwrap_or(f);
-        let clear_css = style::clear_css(id, press);
+        let clear_css = style::clear_css(id, press, has_press);
         for (name, unit, map) in writes {
             let modes = self.answers.modes;
             let channel = crate::modes::CHANNELS

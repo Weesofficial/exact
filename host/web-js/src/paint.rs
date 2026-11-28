@@ -294,10 +294,11 @@ pub fn needed(plan: &Plan, parts: &[Option<exact_web::host::template::Parts>]) -
                 .map(|b| plan.binding(b))
                 .any(|b| {
                     crate::style::literal(plan, plan.code(b.expr)).is_none()
-                        && binding(
+                        && binding_with_props(
                             plan,
                             NodeType::from_wire(plan.nodes.get(i).unwrap().node_type).unwrap(),
                             &b,
+                            Some(&[]),
                             |_| String::new(),
                         )
                         .is_some()
@@ -307,11 +308,22 @@ pub fn needed(plan: &Plan, parts: &[Option<exact_web::host::template::Parts>]) -
 
 /// The attribute and its value expression, with `v` the binding's value.
 /// The tests are own_from's value tests, in the row's authored vocabulary.
-#[allow(clippy::field_reassign_with_default)]
+#[cfg(test)]
 pub fn binding(
     plan: &Plan,
     kind: NodeType,
     b: &BindingsRow,
+    parser: impl FnOnce(Parser) -> String,
+) -> Option<(String, String)> {
+    binding_with_props(plan, kind, b, None, parser)
+}
+
+#[allow(clippy::field_reassign_with_default)]
+pub fn binding_with_props(
+    plan: &Plan,
+    kind: NodeType,
+    b: &BindingsRow,
+    props: Option<&[(String, String)]>,
     parser: impl FnOnce(Parser) -> String,
 ) -> Option<(String, String)> {
     let bits = |value: String| Some((format!("data-exact-f-{}-{}", b.kind as u8, b.id), value));
@@ -354,17 +366,36 @@ pub fn binding(
         }
         // A number token's name (LLP 1121 D7) stands for its value: one that
         // varies may be below 1; a name no token has is unset, 1.
-        StyleId::Opacity => {
+        StyleId::Opacity | StyleId::PressScale => {
+            let owned_props = (id == StyleId::PressScale
+                && props.is_none()
+                && plan.theme.iter().any(|r| r.kind == 2))
+            .then(|| crate::modes::properties(plan));
+            let active_props = (id == StyleId::PressScale)
+                .then(|| props.or(owned_props.as_deref()))
+                .flatten();
             let tokens: Vec<String> = plan
                 .theme
                 .iter()
                 .filter(|r| r.kind == 2)
                 .map(|r| {
-                    let value = if r.slices.len > 0 { "0" } else { plan.str(r.value).trim() };
+                    let is_var = active_props.map_or(r.slices.len > 0, |p| {
+                        p.iter().any(|(n, _)| n == plan.str(r.name))
+                    });
+                    let value = if is_var { "0" } else { plan.str(r.value).trim() };
                     format!("{}:{value}", serde_json::to_string(plan.str(r.name)).unwrap())
                 })
                 .collect();
-            let test = if tokens.is_empty() {
+            let test = if id == StyleId::PressScale {
+                let tok = if tokens.is_empty() {
+                    String::new()
+                } else {
+                    format!("const k={{{}}}[t];if(k!==undefined)return k!==1;", tokens.join(","))
+                };
+                format!(
+                    "(()=>{{if(v==null)return false;const t=String(v).trim();if(!t||/^(?:unset|initial|inherit|revert|revert-layer)$/i.test(t))return false;{tok}const n=Number(t);return Number.isFinite(n)?n!==1:/^(?:var|calc)\\(/i.test(t)}})()"
+                )
+            } else if tokens.is_empty() {
                 "v!=null&&Number(v)<1".to_string()
             } else {
                 format!(
@@ -374,9 +405,8 @@ pub fn binding(
             };
             return flag(STACK, &test);
         }
-        StyleId::PressScale => "v!=null&&Number(v)!==1",
         StyleId::Perspective => "v!=null&&parseFloat(v)>0",
-        StyleId::PressTranslate => return flag(POLICY, "v!=null&&String(v).trim()!==\"\"&&!/^(none|unset|initial|revert|revert-layer)$/i.test(String(v).trim())"),
+        StyleId::PressTranslate => return flag(POLICY, "v!=null&&String(v).trim()!==\"\"&&!/^(none|unset|initial|inherit|revert|revert-layer)$/i.test(String(v).trim())"),
         StyleId::Translate
         | StyleId::Scale
         | StyleId::Rotate
