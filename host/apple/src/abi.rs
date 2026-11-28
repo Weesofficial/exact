@@ -879,9 +879,9 @@ impl<D: DataSource> Bridge<D> {
         self.install_presence(
             &mut candidate.host,
             candidate.bindings.as_ref(),
-            candidate.presence,
+            candidate.presence.take(),
         );
-        candidate.host.commit_boot();
+        self.commit_candidate_boot(&mut candidate);
         if let Some(live) = &self.host {
             candidate
                 .host
@@ -915,7 +915,11 @@ impl<D: DataSource> Bridge<D> {
         self.wake = candidate.hooks.wake.map(|w| (w, candidate.hooks.wake_ctx));
         self.executor = executor;
         self.restore_window.clear();
-        let batch = self.replace_host(candidate.host, candidate.batch);
+        let batch = self.replace_host_plan(
+            candidate.host,
+            candidate.batch,
+            candidate.carried_from.as_ref(),
+        );
         self.launch_layout.insets = None;
         self.adopt_app_module();
         self.parked.clear();

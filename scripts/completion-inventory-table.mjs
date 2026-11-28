@@ -778,7 +778,7 @@ export const classifications = [
   group("shared tokens", ["one-shot"], "share token in the live router; copying may outlive the initiating view", "UI-owned",
     "runner/src/runner/picker/shared.rs:596-630 updates only a token accepted by router.share. Copied files can survive, but this completion targets the current router token.", [
     ["painted:host/painted/src/host.rs", "Host::set_shared"],
-    ["runner:runner/src/runner/picker/shared.rs", "Runner::claim_share Runner::set_shared"],
+    ["runner:runner/src/runner/picker/shared.rs", "Claimed::has_files Runner::claim_share Runner::claim_share_checked Runner::clear_shared Runner::set_shared"],
   ]),
   group("sockets and listens", ["subscription"], "source stream/watch and pending subscription in a session", "UI-owned",
     "runner/src/runner/sockets.rs and listen.rs associate reader facts with source requests; retirement of the source removes the UI observer.", [
@@ -1147,7 +1147,7 @@ export const classifications = [
       "Runner::count_dispatch#committed:1 Runner::count_dispatch#dispatched:1 Runner::count_failure#count:1 Runner::measure#before:1 Runner::measure#created:1 " +
       "Runner::moved#moved:1 Runner::tally#authored:1 Runner::tally#inherited:1"],
     ["runner:runner/src/runner/persist.rs", "Reader::eat#at:1 Reader::number#at:1 Reader::space#at:1 Reader::string#at:1"],
-    ["runner:runner/src/runner/picker/shared.rs", "Claimed::copy_with#dropped:1 Claims::claim#2:1 Claims::claim#2:2"],
+    ["runner:runner/src/runner/picker/shared.rs", "Claimed::copy_checked#dropped:1 Claimed::copy_with#dropped:1 Claims::claim_inner#2:1 Claims::claim_inner#2:2"],
     ["runner:runner/src/runner/processes.rs", "Runner::note_child_outcome#bytes_out:1 Runner::note_child_sent#bytes_in:1"],
     ["runner:runner/src/runner/query.rs", "Runner::count_churn#2:1"],
     ["runner:runner/src/runner/queue.rs", "Runner::ask_send#mutation_requests:1"],
@@ -1187,7 +1187,7 @@ export const classifications = [
   ]),
   group("shared tokens", ["one-shot"], "share token in the current router and launch-seeded copied-file path", "UI-owned",
     "runner/src/runner/picker/shared.rs Claims::claim advances files for copied paths and tokens for incoming router shares. set_shared admits only the live router token.", [
-    ["runner:runner/src/runner/picker/shared.rs", "Claims::claim#files:1 Claims::claim#tokens:1"],
+    ["runner:runner/src/runner/picker/shared.rs", "Claims::claim_inner#files:1 Claims::claim_inner#tokens:1"],
   ]),
   group("wakes", ["durable operation"], "app wake reference and retry/backoff state", "durable",
     "runner/src/runner/modules/declared/wake_list.rs wake_entry_ended increments the wake reference retry count and uses it to schedule backoff, independently of a mounted UI.", [

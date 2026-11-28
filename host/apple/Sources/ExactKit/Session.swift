@@ -499,6 +499,7 @@ public final class ExactSession {
     func retireInputHold(_ hold: SwipeHold) { inputHolds.remove(hold) }
     var pendingSurfaceRecords: [(Runtime) -> Batch] = []
     var pendingSurfaceWork: [([String: Any], Int)] = []
+    private var pendingApplyCallbacks: [(epoch: Int, landed: (() -> Void)?, dropped: (() -> Void)?)] = []
     /// Authentication sessions this session opened (`Auth.swift`, LLP 1069.006).
     let authSessions = AuthSessions()
 
@@ -1026,17 +1027,17 @@ public final class ExactSession {
 
     /// Land earlier owner batches first (T4), then skip presentation if nothing changed.
     /// Native controls and the agent's animation clock can require a full `apply`.
-    func applyUnlessEmptyNow(_ batch: Batch, presentation: PendingBatch.Presentation, scrolled: Bool, resized: Bool, beside plan: StagePlan?) {
-        guard !batch.busy, !batch.held else { return }
-        guard !applying else { applyNow(batch, beside: plan); return }
+    func applyUnlessEmptyNow(_ batch: Batch, presentation: PendingBatch.Presentation, scrolled: Bool, resized: Bool, beside plan: StagePlan?, barrier: Bool = false, landed: (() -> Void)? = nil, dropped: (() -> Void)? = nil) {
+        guard !batch.busy, !batch.held else { dropped?(); return }
+        guard !applying else { applyNow(batch, beside: plan, barrier: barrier, landed: landed, dropped: dropped); return }
         if !landing, ownerInFlight, hasPublished() {
             // What the slices leave owed is asked after this batch, as in `apply`.
             holdingReports = true; landFill(before: batch.sequence == 0 ? .max : batch.sequence); holdingReports = false
-            guard state != .destroyed else { return }
-            guard stage === plan else { return order(PendingBatch(batch: batch, presentation: presentation, scrolled: scrolled, resized: resized)) }
+            guard state != .destroyed else { dropped?(); return }
+            guard stage === plan else { return order(PendingBatch(batch: batch, presentation: presentation, scrolled: scrolled, resized: resized, barrier: barrier, landed: landed, dropped: dropped)) }
         }
-        guard !fillInFlight, !tickInFlight, !advanceInFlight, !canvasInFlight, noticesInFlight == 0, coversInFlight == 0, changesNothing(batch) else { applyNow(batch, beside: plan); return }
-        if presentation == .appKitEvent, !canSkipAppKitPresentation(batch) { return applyNow(batch, beside: plan) }
+        guard !fillInFlight, !tickInFlight, !advanceInFlight, !canvasInFlight, noticesInFlight == 0, coversInFlight == 0, changesNothing(batch) else { applyNow(batch, beside: plan, barrier: barrier, landed: landed, dropped: dropped); return }
+        if presentation == .appKitEvent, !canSkipAppKitPresentation(batch) { return applyNow(batch, beside: plan, barrier: barrier, landed: landed, dropped: dropped) }
         // Its transactions are reported once (LLP 1079 D3): account for them, at no presentation cost.
         sampler?.batch(batch.seq, ms: 0); logSkipped(batch)
         if presentation == .unlessEmpty { relayStore(batch) }
@@ -1050,7 +1051,7 @@ public final class ExactSession {
             #endif
         }
         // What the pass did that a scroll moves (`scrolledWithoutPass`).
-        if scrolled { presenter.scrolledWithoutPass() }
+        if scrolled { presenter.scrolledWithoutPass() }; landed?()
         runWaitingWork()
         drainReports()
         workEnded()
@@ -1100,11 +1101,11 @@ public final class ExactSession {
     var missingCapabilities: Set<String> = []
 
     /// `apply`'s work; `plan` is the stage the batch passes, if one is open.
-    func applyNow(_ batch: Batch, beside plan: StagePlan? = nil) {
-        guard state != .destroyed, !batch.busy, !batch.held else { return }
+    func applyNow(_ batch: Batch, beside plan: StagePlan? = nil, barrier: Bool = false, landed: (() -> Void)? = nil, dropped: (() -> Void)? = nil) {
+        guard state != .destroyed, !batch.busy, !batch.held else { dropped?(); return }
         // What is made while it applies its own ops (a callback's batch, a report's) waits for them, then
         // applies inside its transaction, before its tail: a row and the cell it goes in commit together.
-        let entering = !insideApply; insideApply = true
+        let entering = !insideApply, startEpoch = viewsEpoch; insideApply = true
         var drained = !entering, transaction = false
         func drain() {
             guard !drained else { return }
@@ -1124,12 +1125,12 @@ public final class ExactSession {
         // At a reveal they came after it.
         if !applying, !landing, !presenter.revealsStage, ownerInFlight, hasPublished() {
             holdingReports = true; landFill(before: batch.sequence == 0 ? .max : batch.sequence); holdingReports = false
-            guard state != .destroyed else { return }
+            guard state != .destroyed else { dropped?(); return }
             // A slice it landed staged: this batch, made after that slice, passes or waits (LLP 1072 T13).
-            guard stage === plan else { return apply(batch) }
+            guard stage === plan else { return apply(batch, barrier: barrier, onLanded: landed, onDropped: dropped) }
         }
         if entering { CATransaction.begin(); transaction = true }
-        if stages(batch) { return }
+        if stages(batch, landed: landed, dropped: dropped) { return }
         #if DEBUG
         onApplyForTests?(batch)
         #endif
@@ -1192,11 +1193,9 @@ public final class ExactSession {
             } }
         }
         drain()
+        if !outermost { if state == .destroyed || viewsEpoch != startEpoch { dropped?() } else if landed != nil || dropped != nil { pendingApplyCallbacks.append((startEpoch, landed, dropped)) } }
         if outermost {
-            while !pendingSurfaceRecords.isEmpty {
-                let record = pendingSurfaceRecords.removeFirst()
-                apply(record(runtime))
-            }
+            while !pendingSurfaceRecords.isEmpty { let record = pendingSurfaceRecords.removeFirst(); apply(record(runtime)) }
             drainReports()
             presenter.collections.flushIfNeeded()
             for hold in inputHolds.allObjects { hold.cancelIfInputIneligible() }
@@ -1204,6 +1203,9 @@ public final class ExactSession {
             transformInputHold?.cancelIfInputIneligible()
             presenter.transformGeometry.changed()
             applying = false
+            let nested = pendingApplyCallbacks; pendingApplyCallbacks = []
+            if state != .destroyed && viewsEpoch == startEpoch { landed?() } else { dropped?() }
+            for cb in nested { if state != .destroyed && viewsEpoch == cb.epoch { cb.landed?() } else { cb.dropped?() } }
             ExactLaunch.shared.applied(self, batch, orientationChanged: orientationChanged)
             workEnded()
             #if os(macOS)
@@ -1438,19 +1440,16 @@ public final class ExactSession {
         DisplayPreferences.forget(preferenceObservers)
         PageFacts.forget(pageObservers); for (center, token) in placeObservers { center.removeObserver(token) }
         leaveObserver.map(NotificationCenter.default.removeObserver)
-        shareInboxObserver.map(NotificationCenter.default.removeObserver)
+        shareHost.sessionDestroyed(self)
+        let pendingCallbacks = pendingApplyCallbacks; pendingApplyCallbacks = []
+        for cb in pendingCallbacks { cb.dropped?() }
         #if os(macOS)
         colorObserver.map(NotificationCenter.default.removeObserver)
         #endif
         endModuleEvents()
-        cancelStage(); runtime.held = true; presenter.reset(); runtime.held = false; _ = runtime.takeHeldCalls(); viewsEpoch += 1; presenter.showDevStatus(nil); app.refreshDevPills() // its pill to another session in its window; the dying runtime told nothing its teardown sets off (ResetGate, none replayed)
-        ExactSession.live.removeValue(forKey: runtime.rt)
-        forgetDocuments()
-        rasters?.shutdown(); sound.shutdown(); midi.shutdown() // the sound arm stopped and let go, its session claim given back (LLP 1096 D8)
-        webviews.endSession() // its frames and in-memory partitions (LLP 1020.002 D1)
-        textPressure?.cancel(); textPressure = nil
-        runtime.destroy()
-        natives.destroyModule()
-        app.forget(self)
+        cancelStage(); runtime.held = true; presenter.reset(); runtime.held = false; _ = runtime.takeHeldCalls(); viewsEpoch += 1; presenter.showDevStatus(nil); app.refreshDevPills()
+        ExactSession.live.removeValue(forKey: runtime.rt); forgetDocuments()
+        rasters?.shutdown(); sound.shutdown(); midi.shutdown(); webviews.endSession()
+        textPressure?.cancel(); textPressure = nil; runtime.destroy(); natives.destroyModule(); app.forget(self)
     }
 }

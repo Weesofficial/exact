@@ -22,6 +22,10 @@ pub struct Carried {
     pub fresh_state: bool,
     /// Picked paths survive reloads, including copies still being imported.
     pub picked_count: u64,
+    /// Shared-target tokens survive reloads so pending claims remain readable.
+    pub shared_tokens: Vec<(String, Value)>,
+    /// Shared-target claim counters survive reloads so token/file names never collide.
+    pub shared_claims: Option<crate::share_in::Claims>,
     /// Router slot name and its value decoded through the old plan's shapes.
     /// @ref LLP 1038 D5 — preserves named params when their field order changes.
     pub router: Option<(String, exact_route::Router)>,
@@ -178,6 +182,11 @@ impl<D: super::DataSource> super::Runner<D> {
                 .map(|tree| tree.carried_lists(&self.plan, &self.kernel))
                 .unwrap_or_default(),
             picked_count: self.picked_count,
+            shared_tokens: self
+                .router
+                .as_deref()
+                .map_or_else(Vec::new, |r| r.share_state().0),
+            shared_claims: self.router.as_deref().and_then(|r| r.share_state().1),
             router: self.carry_router(),
             data_revision: self.data.revision().map(str::to_owned),
             keeps_answers: self.keeping.on,
@@ -265,6 +274,16 @@ impl<D: super::DataSource> super::Runner<D> {
             faults: (!self.faults.is_empty()).then(|| self.faults.spec()),
             modes: self.modes(),
             uploads: self.carried_uploads(),
+        }
+    }
+
+    /// Restore carried share tokens and claim counters onto the router before
+    /// `init_slots` runs so state initializers reading `sharedFiles` see them.
+    pub(super) fn restore_carried_share(&mut self, carried: Option<&Carried>) {
+        if let Some(c) = carried {
+            if let Some(router) = self.router.as_deref() {
+                router.restore_share_state(c.shared_tokens.clone(), c.shared_claims.clone());
+            }
         }
     }
 

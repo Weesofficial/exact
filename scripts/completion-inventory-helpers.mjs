@@ -152,7 +152,7 @@ export function helperClassifications(group) {
   ]),
   group("shared tokens", ["one-shot"], "share token in the live router; copying may outlive the initiating view", "UI-owned",
     "The named public runner-crate source is the shared tokens API or its value/admission helper. runner/src/runner/picker/shared.rs:596-630 updates only a token accepted by router.share. Copied files can survive, but this completion targets the current router token.", [
-    ["runner:runner/src/runner/picker/shared.rs", "Claimed::copy Claimed::copy_with Claims::claim Claims::new is_token location Pending::from_json received_line shared_path SharedFiles::value ShareTarget::from_json token"],
+    ["runner:runner/src/runner/picker/shared.rs", "Claimed::copy Claimed::copy_checked Claimed::copy_with Claims::claim Claims::claim_checked Claims::new is_token location Pending::from_json received_line shared_path SharedFiles::validate SharedFiles::value ShareTarget::from_json token"],
   ]),
   group("module lifecycle", ["one-shot"], "module binding, source instance or session configuration", "UI-owned",
     "The named public runner-crate source is the module lifecycle API or its value/admission helper. runner/src/runner/modules/bound.rs binds live module instances; runner/src/runner/kept.rs data_ready reconciles the current source/store before settlement.", [

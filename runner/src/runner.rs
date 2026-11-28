@@ -1049,6 +1049,7 @@ impl<D: DataSource> Runner<D> {
         };
         runner.seams.modules.launch_substitutes(&mut runner)?;
         runner.record_replacement(carried);
+        runner.restore_carried_share(carried);
         runner.init_slots(carried, launch)?;
         runner.carry_modes(carried.map_or(&[], |c| &c.modes));
         runner.ask_kept_scheme();

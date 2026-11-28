@@ -136,7 +136,7 @@ mod resize;
 #[path = "scale.rs"]
 mod scale;
 #[path = "share_in.rs"]
-mod share_in;
+pub(crate) mod share_in;
 #[path = "snapshot.rs"]
 pub(crate) mod snapshot;
 pub(crate) use scale::LaunchLayout;
