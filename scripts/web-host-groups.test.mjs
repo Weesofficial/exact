@@ -105,7 +105,7 @@ test('static imports: import, export and side-effect forms, with comments, not d
   expect(staticImports(`function h(require) { return require('./h.js'); }`)).toEqual([]);
 });
 
-test('the shipped wasm drag-out listener has no imports for a retry to reuse', async () => {
+test('the shipped wasm drag-out and GPU host modules have no static imports for a retry to reuse', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'exact-web-drag-out-'));
   try {
     await buildHostGlue(ROOT, { out: dir });
@@ -113,6 +113,11 @@ test('the shipped wasm drag-out listener has no imports for a retry to reuse', a
     const code = readFileSync(source.startsWith('target/web-host/') ? join(dir, 'drag-out.js') : join(ROOT, source), 'utf8');
     expect(new Bun.Transpiler({ loader: 'js' }).scanImports(code)).toEqual([]);
     expect(files).not.toHaveProperty('drag-input.js');
+    expect(Object.keys(webHostFiles('gpu'))).toEqual(['gpu-glue.js']);
+    for (const name of ['gpu-glue.js', 'gpu-modules.js']) {
+      const built = readFileSync(join(dir, name), 'utf8');
+      expect(staticImports(built), name).toEqual([]);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -147,6 +152,8 @@ test('concurrent host builds preserve modules already opened by a reader', async
       'navigation.js': "export { grant } from './grant-admission.js';\nexport const value = 'complete';\n",
       'grant-admission.js': 'export const grant = true;\n',
       'drag-out.js': 'export const drag = true;\n',
+      'gpu-glue.js': 'export const gpu = true;\n',
+      'gpu-modules.js': 'export const router = true;\n',
     };
     for (const [name, text] of Object.entries(modules)) {
       writeFileSync(join(source, name), text);

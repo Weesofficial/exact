@@ -8,22 +8,57 @@
 // `gpu-glue.js?artifact=<stem>`: its own device, surfaces, recovery and frame
 // loop. Everything addressed to a view goes to that view's artifact; the rest
 // fans out, and replies that list worlds are joined.
+import { retryTransient, isTransientLoadError, classifyScriptError, nextTry, armOnline, clearOnline, watchOnline } from "./load-once.js";
 const exact = globalThis.exact;
 const owners = new Map(Object.entries(exact.compat.inputs.gpuModules)
   .flatMap(([module, names]) => names.map(name => [name, `gpu/${module}`])));
 const stemOf = name => owners.get(name) ?? "gpu";
 const hosts = new Map(); // stem -> a registered gpu-glue.js instance
 const loading = new Map(); // stem -> its import, from the moment it was needed
+const permanentFailures = new Set(); // stems whose import failed permanently (404, eval error)
+const onlineSlots = {}, tryCounts = {}; // per-stem online listener and monotonic retry counter
 const queued = new Map(); // stem -> view -> [name, values], until its instance registers
 const views = new Map(); // view -> stem
 const names = new Map(); // view -> its surface name
 // After a rendering opportunity (two frames) or a second, whichever is first: a page in a frame scrolled out of view
 // gets no frames (navigation.js `afterPaint`); frames only under the agent, whose clock owns time.
 const afterPaint = () => new Promise(resolve => { requestAnimationFrame(() => requestAnimationFrame(resolve)); if (!exact.agent) setTimeout(resolve, 1000); });
+const needed = stem => !hosts.has(stem) && !permanentFailures.has(stem) && (queued.get(stem)?.size ?? 0) > 0;
 function need(stem, deferred = true) {
-  if (!loading.has(stem)) loading.set(stem, (deferred ? afterPaint() : Promise.resolve())
-    .then(() => import(`./gpu-glue.js?artifact=${stem}`))
-    .catch(error => { queued.delete(stem); exact.devError?.(String(error)); console.error(`exact gpu: ${stem}:`, error); }));
+  if (!loading.has(stem) && needed(stem)) {
+    let loaded = false, online;
+    const p = (deferred ? afterPaint() : Promise.resolve())
+      .then(() => {
+        if (!needed(stem)) return;
+        loaded = true; online = watchOnline();
+        return retryTransient(async () => {
+          const target = nextTry(`./gpu-glue.js?artifact=${stem}`, tryCounts, stem);
+          try { return await import(target); }
+          catch (error) { throw await classifyScriptError(new URL(target, import.meta.url).href, error); }
+        }, { canRetry: () => needed(stem) });
+      })
+      .then(() => {
+        online?.stop();
+        if (!loaded) {
+          if (loading.get(stem) === p) loading.delete(stem);
+          if (needed(stem)) return need(stem, false);
+          return;
+        }
+        if (!hosts.has(stem)) throw Object.assign(new Error(`GPU module ${stem} did not register`), { transient: false });
+        clearOnline(onlineSlots, stem);
+      })
+      .catch(error => {
+        const reconnected = online?.seen() ?? false;
+        online?.stop();
+        if (loading.get(stem) === p) loading.delete(stem);
+        if (isTransientLoadError(error) && needed(stem) && reconnected) return need(stem, false);
+        exact.devError?.(String(error), stem);
+        console.error(`exact gpu: ${stem}:`, error);
+        if (isTransientLoadError(error) && needed(stem)) armOnline(onlineSlots, stem, () => { if (needed(stem)) need(stem, false); });
+        else if (!isTransientLoadError(error)) { permanentFailures.add(stem); clearOnline(onlineSlots, stem); }
+      });
+    loading.set(stem, p);
+  }
   return loading.get(stem);
 }
 const each = (method, ...args) => { for (const host of hosts.values()) host[method]?.(...args); };
@@ -32,6 +67,9 @@ const posts = [];
 
 const router = {
   register(stem, host) {
+    permanentFailures.delete(stem);
+    exact.devError?.(null, stem);
+    clearOnline(onlineSlots, stem);
     hosts.set(stem, host);
     for (const [view, [name, values]] of queued.get(stem) ?? []) host.surface(view, name, values);
     queued.delete(stem);
@@ -74,6 +112,7 @@ const router = {
     views.delete(view);
     names.delete(view);
     queued.get(stem)?.delete(view);
+    if (stem && !(queued.get(stem)?.size)) clearOnline(onlineSlots, stem);
     hosts.get(stem)?.destroy(view);
   },
   async surfaceWork(name, mode, bytes, active) {
@@ -86,7 +125,11 @@ const router = {
   },
   async settled(wakes = false) {
     await Promise.all(loading.values());
-    return (await Promise.all([...hosts.values()].map(host => host.settled(wakes)))).flat();
+    const pending = (await Promise.all([...hosts.values()].map(host => host.settled(wakes)))).flat();
+    for (const [stem, entries] of queued) if (!hosts.has(stem) && !permanentFailures.has(stem)) {
+      for (const [view, [name]] of entries) pending.push({ name: `GPU module ${name}`, canvas: view });
+    }
+    return pending;
   },
   decorate(request, reply) {
     for (const host of hosts.values()) reply = host.decorate(request, reply);
@@ -109,7 +152,7 @@ const router = {
     return () => { for (const commit of commits) commit(); };
   },
   placementHidden: el => [...hosts.values()].some(host => host.placementHidden(el)),
-  reset(carry) { each("reset", carry); queued.clear(); views.clear(); names.clear(); },
+  reset(carry) { each("reset", carry); for (const stem of Object.keys(onlineSlots)) clearOnline(onlineSlots, stem); permanentFailures.clear(); queued.clear(); views.clear(); names.clear(); },
   // Dev only (dev.js): a module's rebuilt artifact; one not loaded yet reads
   // its version from `exact.gpuVersions` when it loads.
   swap(version, module) { return hosts.get(module ? `gpu/${module}` : "gpu")?.swap(version) ?? { ms: 0, errors: [] }; },

@@ -11,7 +11,7 @@ import { Views, Ids, viewId, Hooks } from './tree.js';
 import { OnHooks } from './events.js';
 import { start, replaceRowNode } from './mount.js';
 import { replaced } from './focus.js';
-import { loadOnce } from '../web/load-once.js';
+import { loadOnce, retryTransient, isTransientLoadError, classifyScriptError, nextTry, armOnline, clearOnline, watchOnline } from '../web/load-once.js';
 
 const loads = {};
 /** A canvas's surface (LLP 1009 D2): its inputs, evaluated as the runner
@@ -32,6 +32,7 @@ function gpuBinding(e, name) {
     if (pending) {
       const idx = pending.findIndex(p => p.id === id);
       if (idx >= 0) pending.splice(idx, 1);
+      if (!pending.length) clearOnline(loads, 'GpuOnline');
     }
     try {
       globalThis.exact?.gpu?.destroy(id);
@@ -87,10 +88,45 @@ function gpuBinding(e, name) {
       x.message ??= (el, text) =>
         el?.dispatchEvent(new CustomEvent('exact-native', { detail: { kind: 'message', value: text } }));
       if (clock.agent) x.now = () => clock.now;
-      inflight.n++;
-      loadOnce(loads, "Gpu", () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
-        .then(() => import(new URL(Object.keys(x.compat?.inputs?.gpuModules ?? {}).length ? 'gpu-modules.js' : 'gpu-glue.js', document.baseURI).href))
-        .then(() => x.gpu?.settled?.()), err => say(`gpu: ${err.message}`)).finally(() => inflight.n--);
+      const needed = () => !x.gpu && !x.gpuFailedPermanent && (x.pendingSurfaces?.length ?? 0) > 0;
+      const loadGpu = deferred => {
+        if (loads.Gpu || !needed()) return loads.Gpu;
+        const url = new URL(Object.keys(x.compat?.inputs?.gpuModules ?? {}).length ? 'gpu-modules.js' : 'gpu-glue.js', document.baseURI).href;
+        let loaded = false, online;
+        inflight.n++;
+        const pending = loadOnce(loads, 'Gpu', () => (deferred ? new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))) : Promise.resolve())
+          .then(() => {
+            if (!needed()) return;
+            loaded = true; online = watchOnline();
+            return retryTransient(async () => {
+              const target = nextTry(url, loads, 'GpuTries');
+              try { return await import(target); }
+              catch (err) { throw await classifyScriptError(target, err); }
+            }, { canRetry: needed });
+          })
+          .then(() => {
+            online?.stop();
+            if (!loaded) {
+              if (loads.Gpu === pending) loads.Gpu = null;
+              if (needed()) return loadGpu(false);
+              return;
+            }
+            if (!x.gpu) throw Object.assign(new Error('GPU module did not register'), { transient: false });
+            clearOnline(loads, 'GpuOnline');
+            return x.gpu?.settled?.();
+          }), err => {
+          const reconnected = online?.seen() ?? false;
+          online?.stop();
+          if (isTransientLoadError(err) && needed() && reconnected) return loadGpu(false);
+          say(`gpu: ${err?.message ?? err}`);
+          console.error('exact gpu:', err);
+          if (isTransientLoadError(err) && needed()) armOnline(loads, 'GpuOnline', () => loadGpu(false));
+          else if (!isTransientLoadError(err)) { x.gpuFailedPermanent = true; clearOnline(loads, 'GpuOnline'); }
+        });
+        pending.finally(() => inflight.n--);
+        return pending;
+      };
+      loadGpu(true);
     }
   };
   return v => {
@@ -274,7 +310,7 @@ export let Pres = null,
  * operation, as glue.js's `agentSettled` waits for `pieces.pending()`). */
 export const pieces = () =>
   Promise.all(
-    [Motion, loads.Inputs, Presence, loads.Flow, loads.Native, Media?.mediaPiece(), decorationPiece(), OnHooks.loading].filter(Boolean),
+    [Motion, loads.Inputs, Presence, loads.Flow, loads.Native, loads.Gpu, Media?.mediaPiece(), decorationPiece(), OnHooks.loading].filter(Boolean),
   ).then(
     () => {},
     () => {},

@@ -7,12 +7,12 @@ import { hostFixtureFile as readFileSync } from './glue-fixture.mjs';
 // read from the sources and run against stand-in frames and timers.
 import { expect, test } from 'bun:test';
 import { glueCase, glueDeclarations } from './glue-fixture.mjs';
+import { loadOnce, retryTransient, isTransientLoadError, isModuleFetchError, classifyScriptError, nextTry, armOnline, clearOnline, watchOnline } from '../load-once.js';
 
 const navigation = readFileSync(new URL('../navigation.js', import.meta.url), 'utf8');
 const glue = readFileSync(new URL('../glue.js', import.meta.url), 'utf8');
 const afterPaint = glueDeclarations(navigation, ['afterPaint']);
-const loadGpu = glue.match(/function loadGpuIfNeeded\(\) \{[^]*?\n\}/)[0];
-const dropSurface = glue.match(/function dropSurface\(id\) \{[^{}]*\}/)[0];
+const gpuHelpers = glueDeclarations(glue, ['loadGpuIfNeeded', 'dropSurface']);
 
 test('after-paint loads reuse published exports and retry a failed load', async () => {
   const scripts = [], exact = {};
@@ -35,9 +35,9 @@ test('after-paint loads reuse published exports and retry a failed load', async 
 // Stand-in frames and timers: each queued, fired when the test says.
 const world = (exact = {}) => {
   const frames = [], timers = [], loads = [];
-  const made = new Function('requestAnimationFrame', 'setTimeout', 'loadAfterPaint', 'exact',
-    `const host = { gpuLoading: null }; const globalThis = { exact }; ${afterPaint}\n${loadGpu}\n${dropSurface}\nreturn { afterPaint, loadGpuIfNeeded, dropSurface };`)(
-    fn => frames.push(fn), (fn, ms) => timers.push([fn, ms]), file => { loads.push(file); return Promise.resolve(); }, exact);
+  const made = new Function('requestAnimationFrame', 'setTimeout', 'loadAfterPaint', 'exact', 'loadOnce', 'retryTransient', 'isTransientLoadError', 'isModuleFetchError', 'classifyScriptError', 'nextTry', 'armOnline', 'clearOnline', 'watchOnline',
+    `const host = { gpuLoading: null }; const globalThis = { exact }; ${afterPaint}\n${gpuHelpers}\nreturn { afterPaint, loadGpuIfNeeded, dropSurface };`)(
+    fn => frames.push(fn), (fn, ms) => timers.push([fn, ms]), file => { loads.push(file); return Promise.resolve({}); }, exact, loadOnce, retryTransient, isTransientLoadError, isModuleFetchError, classifyScriptError, nextTry, armOnline, clearOnline, watchOnline);
   const frame = () => { const now = frames.splice(0); for (const fn of now) fn(); };
   return { ...made, frames, timers, loads, frame, timer: () => timers.splice(0).forEach(([fn]) => fn()) };
 };

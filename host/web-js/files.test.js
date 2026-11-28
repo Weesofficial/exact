@@ -302,9 +302,11 @@ test.each(['fs', 'sqlite', 'documents'])('storage retries a refused %s adapter i
 });
 
 test('wasm GPU and geometry loads retry after a refusal', async () => {
+  const { retryTransient, isTransientLoadError, isModuleFetchError, classifyScriptError, nextTry, armOnline, clearOnline, watchOnline } = await import('../web/load-once.js');
   const glue = readFileSync(new URL('../web/glue.js', import.meta.url), 'utf8');
   const boot = readFileSync(new URL('../web/wasm/boot.js', import.meta.url), 'utf8');
-  for (const kind of ['gpu', 'geometry']) {
+  // Geometry: a failed load clears geometryLoading so the next trigger retries.
+  {
     let attempts = 0, installed = 0, settled = 0;
     const host = {}, lines = [], geometry = {};
     const bindings = { loadOnce, host, root: {}, requestAnimationFrame: resolve => resolve(),
@@ -313,19 +315,104 @@ test('wasm GPU and geometry loads retry after a refusal', async () => {
       globalThis: { exact: { pendingSurfaces: [{}] } },
       loadAfterPaint: () => ++attempts === 1 ? Promise.reject(new TypeError('network')) : Promise.resolve(() => { installed++; return geometry; }),
     };
-    const run = new Function(...Object.keys(bindings), glueDeclarations(kind === 'gpu' ? glue : boot, [kind === 'gpu' ? 'loadGpuIfNeeded' : 'loadGeometry']) + '; return ' + (kind === 'gpu' ? 'loadGpuIfNeeded' : 'loadGeometry'))(...Object.values(bindings));
-    const key = kind === 'gpu' ? 'gpuLoading' : 'geometryLoading';
-    run(); run(); await host[key];
+    const run = new Function(...Object.keys(bindings), glueDeclarations(boot, ['loadGeometry']) + '; return loadGeometry')(...Object.values(bindings));
+    run(); run(); await host.geometryLoading;
     expect(lines.length).toBe(1);
-    expect(host[key]).toBeNull();
+    expect(host.geometryLoading).toBeNull();
     expect(attempts).toBe(1);
     expect(settled).toBe(0);
-    run(); run(); await host[key];
-    run(); await host[key];
+    run(); run(); await host.geometryLoading;
+    run(); await host.geometryLoading;
     expect(attempts).toBe(2);
-    expect(installed).toBe(kind === 'gpu' ? 0 : 1);
-    expect(settled).toBe(kind === 'gpu' ? 0 : 1);
+    expect(installed).toBe(1);
+    expect(settled).toBe(1);
     expect(lines.length).toBe(1);
+  }
+  // GPU: real loadAfterPaint script.onerror rejection retries on transient 503 with ?try=N and fails fast on permanent 404.
+  {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response('', { status: 503 });
+    try {
+      let attempts = 0;
+      const files = [], host = {}, lines = [], exact = { pendingSurfaces: [{}] };
+      const loadAfterPaint = new Function('URL', 'baseURL', 'globalThis', 'document',
+        glueDeclarations(glue, ['loadAfterPaint']).replaceAll('import.meta.url', 'baseURL') + '; return loadAfterPaint;')(
+        URL, 'https://exact.test/glue.js', { exact }, {
+          createElement: () => ({ remove() {} }),
+          head: { append(script) {
+            files.push(new URL(script.src).pathname + new URL(script.src).search);
+            queueMicrotask(() => { if (++attempts <= 2) script.onerror(); else { exact.gpu = {}; script.onload(); } });
+          } },
+        });
+      const bindings = { loadOnce, retryTransient: (fn, o) => retryTransient(fn, { ...o, delays: [0, 0, 0] }),
+        isTransientLoadError, isModuleFetchError, classifyScriptError, nextTry, armOnline, clearOnline, watchOnline, host, console: { error: (...args) => lines.push(args) },
+        globalThis: { exact }, loadAfterPaint };
+      const run = new Function(...Object.keys(bindings), glueDeclarations(glue, ['loadGpuIfNeeded']) + '; return loadGpuIfNeeded')(...Object.values(bindings));
+      run(); run(); await host.gpuLoading;
+      expect(attempts).toBe(3);
+      expect(files).toEqual(['/gpu-glue.js', '/gpu-glue.js?try=1', '/gpu-glue.js?try=2']);
+      expect(lines.length).toBe(0);
+    } finally { globalThis.fetch = origFetch; }
+  }
+  // Permanent 404 on loadAfterPaint fails fast without retries or online re-arm, and sets gpuFailedPermanent.
+  {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response('', { status: 404 });
+    try {
+      let attempts = 0;
+      const host = {}, lines = [], online = new Set(), exact = { pendingSurfaces: [{}] };
+      const loadAfterPaint = new Function('URL', 'baseURL', 'globalThis', 'document',
+        glueDeclarations(glue, ['loadAfterPaint']).replaceAll('import.meta.url', 'baseURL') + '; return loadAfterPaint;')(
+        URL, 'https://exact.test/glue.js', { exact }, {
+          createElement: () => ({ remove() {} }),
+          head: { append(script) { attempts++; queueMicrotask(() => script.onerror()); } },
+        });
+      const bindings = { loadOnce, retryTransient: (fn, o) => retryTransient(fn, { ...o, delays: [0, 0, 0] }),
+        isTransientLoadError, isModuleFetchError, classifyScriptError, nextTry,
+        armOnline: (s, k, fn) => { if (!s[k]) { s[k] = fn; online.add(fn); } },
+        clearOnline: (s, k) => { if (s[k]) { online.delete(s[k]); s[k] = null; } },
+        watchOnline, host, console: { error: (...args) => lines.push(args) }, globalThis: { exact }, loadAfterPaint };
+      const run = new Function(...Object.keys(bindings), glueDeclarations(glue, ['loadGpuIfNeeded']) + '; return loadGpuIfNeeded')(...Object.values(bindings));
+      run(); await host.gpuLoading;
+      run(); await host.gpuLoading;
+      expect(attempts).toBe(1);
+      expect(host.gpuFailedPermanent).toBe(true);
+      expect(online.size).toBe(0);
+      expect(lines.length).toBe(1);
+    } finally { globalThis.fetch = origFetch; }
+  }
+  // A script that resolves without registering exact.gpu fails permanently instead of caching undefined.
+  {
+    let attempts = 0;
+    const host = {}, lines = [], exact = { pendingSurfaces: [{}] };
+    const bindings = { loadOnce, retryTransient: (fn, o) => retryTransient(fn, { ...o, delays: [0, 0, 0] }),
+      isTransientLoadError, isModuleFetchError, classifyScriptError, nextTry, armOnline, clearOnline, watchOnline,
+      host, console: { error: (...args) => lines.push(args) }, globalThis: { exact },
+      loadAfterPaint: () => { attempts++; return Promise.resolve(undefined); } };
+    const run = new Function(...Object.keys(bindings), glueDeclarations(glue, ['loadGpuIfNeeded']) + '; return loadGpuIfNeeded')(...Object.values(bindings));
+    await run();
+    expect(attempts).toBe(1);
+    expect(host.gpuLoading).toBeNull();
+    expect(host.gpuFailedPermanent).toBe(true);
+    expect(lines.length).toBe(1);
+  }
+  // Exhausted transient error arms at most one online listener across repeated triggers and clears gpuLoading.
+  {
+    let attempts = 0;
+    const host = {}, lines = [], online = new Set(), exact = { pendingSurfaces: [{}] };
+    const loadAfterPaint = () => { attempts++; return Promise.reject(Object.assign(new Error('host module loader failed: ./gpu-glue.js'), { transient: true })); };
+    const bindings = { loadOnce, retryTransient: (fn, o) => retryTransient(fn, { ...o, delays: [0, 0, 0] }),
+      isTransientLoadError, isModuleFetchError, classifyScriptError, nextTry,
+      armOnline: (s, k, fn) => { if (!s[k]) { s[k] = fn; online.add(fn); } },
+      clearOnline: (s, k) => { if (s[k]) { online.delete(s[k]); s[k] = null; } },
+      watchOnline, host, console: { error: (...args) => lines.push(args) }, globalThis: { exact }, loadAfterPaint };
+    const run = new Function(...Object.keys(bindings), glueDeclarations(glue, ['loadGpuIfNeeded']) + '; return loadGpuIfNeeded')(...Object.values(bindings));
+    run(); await host.gpuLoading;
+    run(); await host.gpuLoading;
+    expect(attempts).toBe(8);
+    expect(host.gpuLoading).toBeNull();
+    expect(online.size).toBe(1);
+    expect(lines.length).toBe(2);
   }
 });
 

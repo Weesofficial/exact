@@ -370,7 +370,10 @@ export function install(exact, { passive = false } = {}) {
   const unwaited = () => holds().length + (exact.extensions?.spans?.() ?? 0);
   // Asks the server holds (`exactHeld`, LLP 1016.000 D9): no clock waited on them; the reply says which.
   const heldNamed = r => { const h = exact.heldAsks?.() ?? []; return h.length && r && !r.error ? { ...r, held: h.length, heldTargets: h.map(x => x.name) } : r; };
-  const settleGpu = async (wakes = false) => await exact.gpu?.settled?.(wakes) ?? [];
+  const settleGpu = async (wakes = false) => exact.gpu
+    ? await exact.gpu.settled?.(wakes) ?? []
+    : exact.gpuFailedPermanent ? []
+      : (exact.pendingSurfaces ?? []).filter(s => s.generation === (exact.generation ?? 0)).map(s => ({ name: `GPU module ${s.name}`, canvas: s.id }));
   const gpuPendingReply = (req, pending) => {
     const names = pending.map(item => item.name ?? 'GPU work');
     return req.op === 'clock' ? heldNamed({ ...tags(), settled: false, reason: 'gpu', pending: names })

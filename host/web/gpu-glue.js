@@ -9,11 +9,12 @@
 // recovery and frame loop — and each instance registers with that router rather than taking `exact.gpu`.
 import { pacer } from "./pace.js";
 import { assetDelivery } from "./gpu-assets.js";
-import { inertAncestor } from "./navigation.js";
+import { inertAncestor } from "./navigation/layers.js";
 import { padPoller } from "./gpu-pads.js";
 import { chooseTier, TIERS } from "./gpu-tier.js";
 import { showRefusal } from "./gpu-refusal.js";
 import { placementStyle, restoreChild, supplyChildren as supplySurfaceChildren, placeChildren as placeSurfaceChildren } from "./gpu-children.js";
+import { retryTransient, isTransientLoadError, classifyScriptError, withTry, fetchText, initWasm, armOnline, clearOnline, watchOnline } from "./load-once.js";
 const artifact = new URL(import.meta.url).searchParams.get("artifact");
 const stem = artifact ?? "gpu";
 let gpu, stopJobs;
@@ -95,24 +96,17 @@ function deliverPosts(name) {
 const glueStyle = document.createElement("style");
 glueStyle.textContent = "[data-gpu-input]:focus{outline:none}" + placementStyle;
 document.head.append(glueStyle);
-let loaded = false, loadMs, moduleGen = 0;
-let recoveringDevice, recovering = false;
-const RECOVERY_LIMIT = 5;
-let recoveryTimer, recoveryFailures = 0, recoveryErrorLogged = false, recoveryTerminalLogged = false;
-let lossDuringRecovery = false, recoveryQueued = false, recoveryNeedsCleanFrame = false;
-let terminalDevice = false;
-const recoveryWaiters = [];
+let loaded = false, loadMs, moduleGen = 0, booting = null, swapping = false, retryAfterSwap = false, initialBooting = false, loadFailedTransient = false;
+let glueModule, glueImportTries = 0; const onlineSlot = {};
+let recoveringDevice, recovering = false, recoveryTimer, recoveryFailures = 0;
+let recoveryErrorLogged = false, recoveryTerminalLogged = false, lossDuringRecovery = false, recoveryQueued = false, recoveryNeedsCleanFrame = false, terminalDevice = false;
+const RECOVERY_LIMIT = 5, recoveryWaiters = [];
 const recoveryBusy = () => Boolean(recovering || recoveringDevice || recoveryTimer || recoveryQueued);
 const afterRecovery = fn => { if (!recoveryBusy()) fn(); else recoveryWaiters.push(fn); };
 function flushRecoveryWaiters() {
-  while (!recoveryBusy() && recoveryWaiters.length) {
-    const fn = recoveryWaiters.shift();
-    try { fn(); } catch (error) { console.error("exact gpu:", error); }
-  }
+  while (!recoveryBusy() && recoveryWaiters.length) { try { recoveryWaiters.shift()(); } catch (error) { console.error("exact gpu:", error); } }
 }
-let tierCode = 0; // the GPU tier this page told its modules (gpu-tier.js `TIERS`)
-let raf = null;
-let finishReady;
+let tierCode = 0, raf = null, finishReady; // tierCode: GPU tier this page told its modules (gpu-tier.js `TIERS`)
 const ready = new Promise((resolve) => { finishReady = resolve; });
 
 function reportError(error, entry) {
@@ -136,22 +130,13 @@ function reportRestore(entry) {
 function finishRestore(entry, module, error) {
   const pending = entry.pendingRestore;
   if (!pending) return;
-  if (error) {
-    entry.restoreError = `surface ${entry.name}: restore refused: ${String(error).replace(/^restore refused: /, "")}`;
-    delete entry.pendingRestore;
-    reportRestore(entry);
-    return;
-  }
+  if (error) { entry.restoreError = `surface ${entry.name}: restore refused: ${String(error).replace(/^restore refused: /, "")}`; delete entry.pendingRestore; reportRestore(entry); return; }
   const world = JSON.parse(module.gpu_agent(entry.id, JSON.stringify({op:"state"})) || "null")?.world;
   if (world && !world.restored) return;
-  if (pending.carrier?.worldCarry === pending.bytes) {
-    delete pending.carrier.worldCarry;
-    if (pending.carrier === exact) delete globalThis.exactWorldCarry;
-  }
+  if (pending.carrier?.worldCarry === pending.bytes) { delete pending.carrier.worldCarry; if (pending.carrier === exact) delete globalThis.exactWorldCarry; }
   delete entry.pendingRestore; delete entry.attemptedCarry; delete entry.carry;
   delete entry.restoreError; delete entry.restoreReported;
-  entry.restoredCarry = true;
-  entry.resampleHeld?.();
+  entry.restoredCarry = true; entry.resampleHeld?.();
 }
 const pendingRecovery = () => {
   const entries = [...surfaces.values()].filter(entry => !entry.terminal);
@@ -159,6 +144,8 @@ const pendingRecovery = () => {
 };
 async function settleModule(wakes = false) {
   await ready;
+  while (booting) await booting;
+  if (!loaded && loadFailedTransient && surfaces.size) return pendingRecovery();
   await Promise.all([...surfaces.values()].map(e => e.refusalPage?.ready));
   if (trapped()) return [];
   const deadline = performance.now() + 2500;
@@ -260,15 +247,9 @@ function installCanvas(old, entry) {
 }
 function resetRecovery() {
   if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = null; }
-  recovering = false;
-  recoveringDevice = null;
-  recoveryQueued = false;
-  recoveryFailures = 0;
-  recoveryErrorLogged = false;
-  recoveryTerminalLogged = false;
-  lossDuringRecovery = false;
-  recoveryNeedsCleanFrame = false;
-  terminalDevice = false;
+  recovering = false; recoveringDevice = null; recoveryQueued = false; recoveryFailures = 0;
+  recoveryErrorLogged = false; recoveryTerminalLogged = false;
+  lossDuringRecovery = false; recoveryNeedsCleanFrame = false; terminalDevice = false;
 }
 function fallback(entry) {
   if (entry.fallbackApplied) return;
@@ -284,19 +265,16 @@ function fallback(entry) {
   entry.el.style.zIndex = "-1";
   entry.el.style.visibility = "hidden";
   // Discard stale pixels while retaining the drawing element's CSS box.
-  entry.el.width = 1;
-  entry.el.height = 1;
+  entry.el.width = 1; entry.el.height = 1;
 }
 function terminalRecovery(outcome) {
   if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = null; }
-  terminalDevice = true;
-  recoveryFailures = RECOVERY_LIMIT;
-  api.recovery = outcome;
+  terminalDevice = true; recoveryFailures = RECOVERY_LIMIT; api.recovery = outcome;
   for (const entry of [...surfaces.values()]) fallback(entry);
 }
 function reportRecovery(error, terminal) {
   if (!recoveryErrorLogged || (terminal && !recoveryTerminalLogged)) {
-    exact.devError?.(String(error)); console.error("exact gpu recovery:", error);
+    exact.devError?.(String(error), stem); console.error("exact gpu recovery:", error);
   }
   recoveryErrorLogged = true;
   recoveryTerminalLogged ||= terminal;
@@ -1000,6 +978,7 @@ const api = {
   settled,
   async surfaceWork(name, mode, bytes, active) {
     await ready;
+    while (booting) await booting;
     const matches=[...surfaces.values()].filter(e=>e.name===name&&answering(e.view)===e);
     if(matches.length!==1)throw Object.assign(new Error(`surface ${name}: expected one live surface, found ${matches.length}`),{kind:2});
     const entry=matches[0], id=entry.id;
@@ -1167,8 +1146,9 @@ const api = {
         && exact.views.get(publisher.view) === publisher.host;
       // Each canvas of a surface runs its own world; the first live one alone publishes the surface's record (LLP 1046.003).
       if (!publisher || !publisherRegistered || !publisher.el.isConnected) publishers.set(name, entry);
-      ensure(entry); return; }
+      if (!loaded && loadFailedTransient && !booting && !initialBooting) retryBoot(); else ensure(entry); return; }
     entry.values = values;
+    if (!loaded && loadFailedTransient && !booting && !initialBooting) { retryBoot(); return; }
     if (entry.id && !entry.terminal) {
       const id = entry.id, gen = moduleGen, owner = entry, at = exact.now?.();
       const bind = () => {
@@ -1186,6 +1166,7 @@ const api = {
     // Retire host bookkeeping and listeners first so a Wasm trap or agent error
     // in GPU teardown can never leave DOM navigation or listeners stuck.
     surfaces.delete(view);
+    if (!surfaces.size) clearOnline(onlineSlot, "boot");
     const id = entry.id;
     entry.id = 0;
     exact.devError?.(null, entry.host);
@@ -1316,13 +1297,13 @@ function replaceShaders(rows, module = gpu) {
   for (const [name, text] of rows) if (!module.gpu_shader(name, text)) throw new Error(module.gpu_error());
 }
 async function loadShaders(module) {
-  const rows = [];
-  if (exact.devAssets === null) for (const name of JSON.parse(module.gpu_shader_names())) {
-    const r = await fetch(new URL(`./shaders/${name}.wgsl`, import.meta.url));
-    if (!r.ok) throw new Error(`shaders/${name}.wgsl: HTTP ${r.status}`);
-    rows.push([name, await r.text()]);
-  }
-  return exact.devAssets === null ? rows : shaderRows(exact.devAssets, module);
+  if (exact.devAssets !== null) return shaderRows(exact.devAssets, module);
+  const ac = typeof AbortController === "function" ? new AbortController() : null;
+  try {
+    return await Promise.all(JSON.parse(module.gpu_shader_names()).map(async name => [
+      name, await fetchText(new URL(`./shaders/${name}.wgsl`, import.meta.url), `shaders/${name}.wgsl`, ac ? { signal: ac.signal } : undefined),
+    ]));
+  } catch (error) { ac?.abort(); throw error; }
 }
 function bindWorkerJobs(module, memory, glue) {
   const bindings = exact.gpu.jobs ??= new WeakMap();
@@ -1369,132 +1350,150 @@ function bindWorkerJobs(module, memory, glue) {
 async function loadModule(version, first = true) {
   if (!version) {
     const glue = new URL(`./${stem}.js`, import.meta.url).href;
-    const module = await import(glue);
-    const exports = await module.default({ module_or_path: new URL(`./${stem}_bg.wasm`, import.meta.url) });
+    const module = glueModule ??= await retryTransient(async () => {
+      const target = withTry(glue, glueImportTries);
+      try { return await import(target); }
+      catch (error) { const next = await classifyScriptError(target, error); if (isTransientLoadError(next)) glueImportTries++; throw next; }
+    });
+    const exports = await initWasm(module.default, new URL(`./${stem}_bg.wasm`, import.meta.url));
     if (typeof module.gpu_child_view !== "function") throw new Error("GPU module is missing gpu_child_view");
-    if (first) try {
+    if (first && !stopJobs) try {
       if (typeof module.exact_game_worker_module === "function" && exports?.memory) bindWorkerJobs(module, exports.memory, glue);
     } catch (error) { console.warn('exact: GPU jobs: using inline jobs', error); }
     return module;
   }
-  const response = await fetch(new URL(`./${stem}.js?g=${version}`, import.meta.url));
-  if (!response.ok) throw new Error(`GPU loader HTTP ${response.status}`);
-  const module = new Function(`${await response.text()}; return wasm_bindgen;`)();
-  await module({ module_or_path: new URL(`./${stem}_bg.wasm?g=${version}`, import.meta.url) });
+  const source = await fetchText(new URL(`./${stem}.js?g=${version}`, import.meta.url), "GPU loader");
+  const module = new Function(`${source}; return wasm_bindgen;`)();
+  await initWasm(module, new URL(`./${stem}_bg.wasm?g=${version}`, import.meta.url));
   if (typeof module.gpu_child_view !== "function") throw new Error("GPU module is missing gpu_child_view");
   return module;
 }
 async function swap(version) {
   await ready;
+  while (booting) await booting;
   while (recoveringDevice) await recoveringDevice;
   if (loaded && version === api.version) return { ms: 0, errors: [] };
-  const start = performance.now(), next = guardedModule(await loadModule(version, false)), staged = [];
-  let lost = false;
-  const carrier = { worldCarry: exact.worldCarry };
+  swapping = true;
   try {
-    next.gpu_tier?.(tierCode);
-    checkSurfaceOwners(next);
-    await next.gpu_load();
-    if (exact.now) next.gpu_seekable(true);
-    if (sentPeriod) next.gpu_period(sentPeriod);
-    const rows = await loadShaders(next);
-    for (const [name, text] of rows) if (!await next.gpu_shader_check(name, text)) throw new Error(next.gpu_error());
-    replaceShaders(rows, next);
-    next.gpu_reduced_motion(reducedMotion());
-    // Wait for any recovery that began while loading the candidate module before reading old carry state.
-    while (recoveringDevice || recoveryQueued) {
-      if (recoveringDevice) await recoveringDevice;
-      else await Promise.resolve();
+    const start = performance.now(), next = guardedModule(await loadModule(version, false)), staged = [];
+    let lost = false;
+    const carrier = { worldCarry: exact.worldCarry };
+    try {
+      next.gpu_tier?.(tierCode);
+      checkSurfaceOwners(next);
+      await next.gpu_load();
+      if (exact.now) next.gpu_seekable(true);
+      if (sentPeriod) next.gpu_period(sentPeriod);
+      const rows = await loadShaders(next);
+      for (const [name, text] of rows) if (!await next.gpu_shader_check(name, text)) throw new Error(next.gpu_error());
+      replaceShaders(rows, next);
+      next.gpu_reduced_motion(reducedMotion());
+      // Wait for any recovery that began while loading the candidate module before reading old carry state.
+      while (recoveringDevice || recoveryQueued) {
+        if (recoveringDevice) await recoveringDevice;
+        else await Promise.resolve();
+      }
+      // A canvas context belongs to one device. Stage on detached replacement
+      // canvases; the old canvases and their worlds remain untouched until commit.
+      // No await from carry through cutover; input cannot arrive between them.
+      for (const old of surfaces.values()) {
+        const entry = { ...old, el: replacementCanvas(old), id: 0, observer: null, unlisten: null, terminal: false, fallbackApplied: false };
+        delete entry.refusalPage; delete entry.unsupported; delete entry.refused;
+        delete entry.restoreError; delete entry.attemptedCarry;
+        delete entry.pendingRestore; delete entry.restoreReported;
+        staged.push([old, entry]);
+        const carry = old.id ? gpu.gpu_carry(old.id) : old.carry;
+        create(entry, next, carry);
+        restorePending(entry, next, carrier);
+        const {w,h,s} = size(old.host);
+        supplyChildren(entry, next, true);
+        const result = next.gpu_render(entry.id, w, h, s, clockFor(frameAt ?? performance.now()));
+        if (result === 2) throw new Error(`surface ${entry.name}: render: ${next.gpu_error()}`);
+        entry.wants = result === 1;
+        lost ||= result === 3;
+      }
+      if (!next.gpu_flush()) throw new Error(`surfaces: flush: ${next.gpu_error()}`);
+    } catch (error) {
+      if (!trapped(next)) {
+        try { for (const [,entry] of staged) if (entry.id) { retainEdits(entry, next); next.gpu_destroy(entry.id); } if (!trapped(next)) next.gpu_unload(); }
+        catch (cleanup) { console.error(cleanup); }
+      }
+      exact.devError?.(String(error)); throw error;
     }
-    // A canvas context belongs to one device. Stage on detached replacement
-    // canvases; the old canvases and their worlds remain untouched until commit.
-    // No await from carry through cutover; input cannot arrive between them.
-    for (const old of surfaces.values()) {
-      const entry = { ...old, el: replacementCanvas(old), id: 0, observer: null, unlisten: null, terminal: false, fallbackApplied: false };
-      delete entry.refusalPage; delete entry.unsupported; delete entry.refused;
-      delete entry.restoreError; delete entry.attemptedCarry;
-      delete entry.pendingRestore; delete entry.restoreReported;
-      staged.push([old, entry]);
-      const carry = old.id ? gpu.gpu_carry(old.id) : old.carry;
-      create(entry, next, carry);
-      restorePending(entry, next, carrier);
-      const {w,h,s} = size(old.host);
-      supplyChildren(entry, next, true);
-      const result = next.gpu_render(entry.id, w, h, s, clockFor(frameAt ?? performance.now()));
-      if (result === 2) throw new Error(`surface ${entry.name}: render: ${next.gpu_error()}`);
-      entry.wants = result === 1;
-      lost ||= result === 3;
+    if (raf !== null) { cancelAnimationFrame(raf); raf = null; }
+    const oldModule = gpu;
+    for (const [old, entry] of staged) {
+      old.refusalPage?.remove();
+      installCanvas(old, entry);
+      if (publishers.get(old.name) === old) publishers.set(old.name, entry);
+      surfaces.set(entry.view, entry);
+      if (old.id) { retainEdits(old, oldModule); oldModule.gpu_destroy(old.id); }
     }
-    if (!next.gpu_flush()) throw new Error(`surfaces: flush: ${next.gpu_error()}`);
+    stopJobs?.();
+    oldModule?.gpu_unload(); gpu = next; moduleGen++; loaded = true; loadFailedTransient = false; retryAfterSwap = false;
+    clearOnline(onlineSlot, "boot"); exact.devError?.(null, stem); resetRecovery();
+    flushRecoveryWaiters();
+    // The replacement has its own device: the failure of the one it replaced no longer describes it.
+    delete api.recovery;
+    for (const [old, entry] of staged) {
+      for (const row of old.children ?? []) if (!entry.children?.some(next => next.el === row.el)) restoreChild(row);
+      placeChildren(entry);
+    }
+    for (const [, entry] of staged) if (entry.pendingRestore?.carrier === carrier) entry.pendingRestore.carrier = exact;
+    api.version = version;
+    if (carrier.worldCarry === undefined) { delete exact.worldCarry; delete globalThis.exactWorldCarry; }
+    const depth = exact.applyDepth ?? 0; exact.applyDepth = depth + 1;
+    try { for (const [,entry] of staged) attach(entry); }
+    finally { exact.applyDepth = depth; drainRecords(); }
+    const errors = staged.flatMap(([,e]) => e.restoreError ? [e.restoreError] : []);
+    // A staged render that found the new device already lost recovers it now that it is the module.
+    if (lost) recoverDevice();
+    return { ms: performance.now() - start, errors };
+  } finally { swapping = false; if (retryAfterSwap) { retryAfterSwap = false; if (!loaded && loadFailedTransient && surfaces.size) retryBoot(); } }
+}
+async function boot(initial = false) {
+  const t0 = performance.now(), online = watchOnline(); let mod, reconnected = false;
+  try {
+    const version = (stem === "gpu" ? exact.gpuVersion : exact.gpuVersions?.[stem]) ?? 0;
+    // The tier is chosen before the device is made, from the adapter's facts (LLP 1139.003 D2).
+    tierCode = Math.max(0, TIERS.indexOf(await chooseTier(exact.pageFacts)));
+    mod = guardedModule(await loadModule(version));
+    checkSurfaceOwners(mod); mod.gpu_tier?.(tierCode); await mod.gpu_load();
+    if (exact.now) mod.gpu_seekable(true);
+    replaceShaders(await loadShaders(mod), mod); mod.gpu_reduced_motion(reducedMotion());
+    if (loaded || terminalDevice) { if (!trapped(mod)) mod.gpu_unload(); return false; }
+    gpu = mod; api.version = version; loaded = true; loadFailedTransient = false; retryAfterSwap = false;
+    clearOnline(onlineSlot, "boot"); exact.devError?.(null, stem); delete api.recovery; resetRecovery();
+    loadMs = performance.now() - t0; if (stem === "gpu") exact.root.dataset.gpuMs = loadMs.toFixed(1);
   } catch (error) {
-    if (!trapped(next)) {
-      try { for (const [,entry] of staged) if (entry.id) { retainEdits(entry, next); next.gpu_destroy(entry.id); } if (!trapped(next)) next.gpu_unload(); }
-      catch (cleanup) { console.error(cleanup); }
+    if (mod && !trapped(mod)) try { mod.gpu_unload(); } catch {}
+    if (!loaded) {
+      stopJobs?.();
+      const failure = failureOutcome(error), transient = isTransientLoadError(error);
+      if (transient) { loadFailedTransient = true; reconnected = online.seen(); api.recovery = { ...failure, status: "failed" }; }
+      else { loadFailedTransient = false; clearOnline(onlineSlot, "boot"); terminalRecovery({ ...failure, status: "no device" }); }
+      reportRecovery(Object.assign(new Error(failure.error), { code: failure.code }), !transient);
     }
-    exact.devError?.(String(error)); throw error;
-  }
-  if (raf !== null) { cancelAnimationFrame(raf); raf = null; }
-  const oldModule = gpu;
-  for (const [old, entry] of staged) {
-    old.refusalPage?.remove();
-    installCanvas(old, entry);
-    if (publishers.get(old.name) === old) publishers.set(old.name, entry);
-    surfaces.set(entry.view, entry);
-    if (old.id) { retainEdits(old, oldModule); oldModule.gpu_destroy(old.id); }
-  }
-  stopJobs?.();
-  oldModule?.gpu_unload(); gpu = next; moduleGen++; loaded = true; resetRecovery();
-  flushRecoveryWaiters();
-  // The replacement has its own device: the failure of the one it replaced no longer describes it.
-  delete api.recovery;
-  for (const [old, entry] of staged) {
-    for (const row of old.children ?? []) if (!entry.children?.some(next => next.el === row.el)) restoreChild(row);
-    placeChildren(entry);
-  }
-  for (const [, entry] of staged) if (entry.pendingRestore?.carrier === carrier) entry.pendingRestore.carrier = exact;
-  api.version = version;
-  if (carrier.worldCarry === undefined) { delete exact.worldCarry; delete globalThis.exactWorldCarry; }
-  const depth = exact.applyDepth ?? 0; exact.applyDepth = depth + 1;
-  try { for (const [,entry] of staged) attach(entry); }
-  finally { exact.applyDepth = depth; drainRecords(); }
-  const errors = staged.flatMap(([,e]) => e.restoreError ? [e.restoreError] : []);
-  // A staged render that found the new device already lost recovers it now that it is the module.
-  if (lost) recoverDevice();
-  return { ms: performance.now() - start, errors };
-}
-const t0 = performance.now();
-try {
-  const version = (stem === "gpu" ? exact.gpuVersion : exact.gpuVersions?.[stem]) ?? 0;
-  // The tier is chosen before the device is made, from the adapter's facts (LLP 1139.003 D2).
-  tierCode = Math.max(0, TIERS.indexOf(await chooseTier(exact.pageFacts)));
-  gpu = guardedModule(await loadModule(version));
-  checkSurfaceOwners(gpu);
-  gpu.gpu_tier?.(tierCode);
-  await gpu.gpu_load();
-  if (exact.now) gpu.gpu_seekable(true);
-  replaceShaders(await loadShaders(gpu));
-  gpu.gpu_reduced_motion(reducedMotion());
-  api.version = version;
-  loaded = true;
-} catch (error) {
-  stopJobs?.();
-  if (!trapped()) gpu?.gpu_unload(); gpu = undefined;
-  const failure = failureOutcome(error);
-  terminalRecovery({...failure, status:"no device"});
-  reportRecovery(Object.assign(new Error(failure.error), {code:failure.code}), true);
-}
-if (loaded) { loadMs = performance.now() - t0; if (stem === "gpu") exact.root.dataset.gpuMs = loadMs.toFixed(1); }
-try {
+  } finally { online.stop(); }
   const waiting = [...surfaces.values()];
   // Routed, the router delivered this artifact's queued surfaces at registration.
-  if (artifact === null) {
-    for (const s of exact.pendingSurfaces ?? []) if (s.generation === exact.generation) {
-      try { api.surface(s.id, s.name, s.values); } catch (error) { reportError(error); }
-    }
-    exact.pendingSurfaces = [];
-    for (const p of exact.pendingPosts ?? []) if (p.generation === exact.generation) api.post(p.name, p.text, p.at);
-    exact.pendingPosts = [];
+  if (initial && artifact === null) {
+    initialBooting = true;
+    try {
+      for (const s of exact.pendingSurfaces ?? []) if (s.generation === exact.generation) { try { api.surface(s.id, s.name, s.values); } catch (error) { reportError(error); } }
+      for (const p of exact.pendingPosts ?? []) if (p.generation === exact.generation) api.post(p.name, p.text, p.at);
+      exact.pendingSurfaces = []; exact.pendingPosts = [];
+    } finally { initialBooting = false; }
   }
+  if (!loaded && loadFailedTransient && surfaces.size && !reconnected) armOnline(onlineSlot, "boot", () => { if (!loaded && loadFailedTransient && surfaces.size) retryBoot(); });
   // A refused initial surface must not prevent independent canvases from loading.
-  for (const entry of waiting) { try { ensure(entry); } catch (error) { reportError(error); } }
-} finally { finishReady(loaded); }
+  for (const entry of waiting) if (!entry.id) { try { ensure(entry); } catch (error) { reportError(error); } }
+  return reconnected;
+}
+function retryBoot() {
+  if (swapping) { if (!loaded && loadFailedTransient) retryAfterSwap = true; return null; }
+  if (booting || loaded || terminalDevice) return booting;
+  const p = boot(false).then(replay => { if (booting === p) booting = null; if (replay && !loaded && loadFailedTransient && surfaces.size) return retryBoot(); });
+  return booting = p;
+}
+try { if (await boot(true) && !loaded && loadFailedTransient && surfaces.size) await retryBoot(); } finally { finishReady(loaded); }

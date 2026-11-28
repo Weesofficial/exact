@@ -229,7 +229,11 @@ export async function waitForInflight(deadline, includeRequests = false) {
 async function settleGpu(wakes = false) {
   loadGpuIfNeeded();
   await host.gpuLoading;
-  return await globalThis.exact.gpu?.settled(wakes) ?? [];
+  if (globalThis.exact.gpu) return await globalThis.exact.gpu.settled(wakes);
+  if (host.gpuFailedPermanent) return [];
+  return (globalThis.exact.pendingSurfaces ?? [])
+    .filter((s) => s.generation === globalThis.exact.generation)
+    .map((s) => ({ name: `GPU module ${s.name}`, canvas: s.id }));
 }
 function gpuPendingReply(request, pending) {
   const names = pending.map((item) => item.name ?? "GPU work");

@@ -70,7 +70,7 @@ const WEB_HOST_GROUPS = {
   storage: ['storage-request.js', 'storage.js', 'storage-fs.js', 'storage-image.js', 'storage-sqlite.js',
     'storage-worker.js', 'sqlite3.mjs', 'sqlite3.wasm'],
   rust: ['rust-glue.js'],
-  gpu: ['gpu-glue.js', 'pace.js', 'gpu-assets.js', 'gpu-pads.js', 'gpu-tier.js', 'gpu-refusal.js', 'gpu-children.js'],
+  gpu: ['gpu-glue.js'],
   gpuModules: ['gpu-modules.js'],
   gpuJobs: ['gpu-jobs.js', 'gpu-jobs-worker.js'],
   native: ['native-glue.js'],
@@ -78,9 +78,9 @@ const WEB_HOST_GROUPS = {
   development: ['frames.js'],
 };
 
-// Each built as one module. drag-out.js carries the input helper it imports, so the wasm target's retry of it from a
-// fresh URL (views.js) fetches the helper again too.
-const HOST_ENTRIES = ['glue.js', 'navigation.js', 'drag-out.js'];
+// Each built as one module. drag-out.js, gpu-glue.js and gpu-modules.js carry the helpers they import, so a retry
+// from a fresh URL never reuses a browser-cached failed sub-import.
+const HOST_ENTRIES = ['glue.js', 'navigation.js', 'drag-out.js', 'gpu-glue.js', 'gpu-modules.js'];
 const BUILT_HOST_FILES = [...HOST_ENTRIES, 'grant-admission.js', 'module-prelude.js'];
 
 /** Public filename -> repo-relative source; omit groups to inventory every host file. */
@@ -132,12 +132,12 @@ export async function bundleModuleGlue(root, file, { production, minify = true }
  * behaviours the page leaves out (navigation.flag; LLP 1047.002 D2.1). */
 export async function bundleHostModule(root, name, { grants = false, production = false, unused = [], packageViews = false } = {}) {
   const web = resolve(root, 'host/web');
-  const external = name === 'glue.js' ? 'navigation.js' : grants ? 'grant-admission.js' : null;
+  const externals = name === 'glue.js' ? ['navigation.js'] : name === 'gpu-glue.js' ? ['gpu-jobs.js', 'picker-glue.js'] : grants ? ['grant-admission.js'] : [];
   const { rolldown } = await import('rolldown'), { gateAgent } = production ? await import('./agent-gate.mjs') : {};
   const bundle = await rolldown({
     input: resolve(web, name),
     transform: { define: { HAS_PACKAGE_VIEWS: String(Boolean(packageViews)), PACKAGE_VIEW_OWNERS: JSON.stringify(packageViews || {}) } },
-    treeshake: false,
+    treeshake: name === 'gpu-glue.js' || name === 'gpu-modules.js',
     optimization: { inlineConst: false },
     plugins: [{
       name: 'host-module-boundary',
@@ -146,9 +146,9 @@ export async function bundleHostModule(root, name, { grants = false, production 
         return production ? gateAgent(code, id) : code;
       },
       resolveId(source, importer) {
-        if (external && importer && resolve(dirname(importer), source) === resolve(web, external)) {
-          return { id: './' + external, external: true };
-        }
+        if (!importer) return;
+        const hit = externals.find(file => resolve(dirname(importer), source) === resolve(web, file));
+        if (hit) return { id: './' + hit, external: true };
       },
     }],
   });

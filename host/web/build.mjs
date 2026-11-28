@@ -621,7 +621,6 @@ const packageViews = !bakeOnly && Object.keys(buildReceipt.graph.extensions).len
 if (!bakeOnly) {
   await buildHostGlue(root, { production, packageViews: packageViews?.owners, out: hostDir });
   copyHostFiles('base');
-  rmSync(hostDir, { recursive: true });
 }
 if (!bakeOnly && !production) copyHostFiles('development');
 // These app-independent modules use the same input-checked products as the JS
@@ -854,6 +853,7 @@ if (gpu.built) {
   // WebGPU shows the refusal page over these and no other canvas (gpu-refusal.js, LLP 1139.003 D1).
   if (game) writeFileSync(resolve(stage, 'index.html'), markWorlds(readFileSync(resolve(stage, 'index.html'), 'utf8'), worldSurfaces(app.dir)));
 }
+if (!bakeOnly) rmSync(hostDir, { recursive: true, force: true });
 // @ref LLP 1024 D3/D5 — the app's module table, beside the page only when the
 // app has modules (the GPU gate): its web executor under `modules/`, fetched
 // after first paint by the host's adapter.

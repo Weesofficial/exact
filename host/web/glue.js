@@ -4,7 +4,7 @@ import { positionContexts, contextPanel } from "./wasm/context.js";
 import { refreshSymbols, syncViewportFit } from "./wasm/views.js";
 import { boot, loadRust, main, reportColors, replacements } from "./wasm/boot.js";
 import { agentInputReady, agent, agentSettled } from "./wasm/agent.js";
-import { loadOnce } from './load-once.js';
+import { loadOnce, retryTransient, isTransientLoadError, isModuleFetchError, classifyScriptError, nextTry, armOnline, clearOnline, watchOnline } from './load-once.js';
 
 placePopovers();
 stampOpenings();
@@ -229,7 +229,7 @@ export function loadAfterPaint(file, exported) {
     const script = Object.assign(document.createElement("script"), { type: "module" });
     script.src = new URL(file, import.meta.url).href;
     script.onload = () => resolve(globalThis.exact[exported]);
-    script.onerror = () => { script.remove(); reject(new Error("host module loader failed: " + file)); };
+    script.onerror = () => { script.remove(); reject(Object.assign(new Error("host module loader failed: " + file), { url: script.src, scriptLoadError: true })); };
     document.head.append(script);
   }) : Promise.resolve(globalThis.exact[exported]);
 }
@@ -912,14 +912,32 @@ export function dropSurface(id) {
   const queued = globalThis.exact.pendingSurfaces;
   if (queued) {
     globalThis.exact.pendingSurfaces = queued.filter((s) => s.id !== id);
+    if (!globalThis.exact.pendingSurfaces.length) clearOnline(host, "gpuOnline");
   }
 }
 // a surface gone before its module loads asks none
 export function loadGpuIfNeeded() {
-  if (host.gpuLoading || !(globalThis.exact.pendingSurfaces ?? []).length) {
-    return;
+  if (host.gpuLoading || host.gpuFailedPermanent || globalThis.exact.gpu || !(globalThis.exact.pendingSurfaces ?? []).length) {
+    return host.gpuLoading;
   }
-  loadOnce(host, "gpuLoading", () => loadAfterPaint(globalThis.exact.compat?.inputs?.gpuModules ? "./gpu-modules.js" : "./gpu-glue.js", "gpu"), (error) => console.error("exact gpu:", error));
+  const file = globalThis.exact.compat?.inputs?.gpuModules ? "./gpu-modules.js" : "./gpu-glue.js";
+  const needed = () => !globalThis.exact.gpu && !host.gpuFailedPermanent && (globalThis.exact.pendingSurfaces?.length ?? 0) > 0;
+  const online = watchOnline();
+  return loadOnce(host, "gpuLoading", () => retryTransient(async () => {
+    const src = nextTry(file, host, "gpuTries");
+    let value;
+    try { value = await loadAfterPaint(src, "gpu"); }
+    catch (error) { throw await classifyScriptError(error?.url ?? src, error, undefined, error?.scriptLoadError ?? isModuleFetchError(error)); }
+    if (!value && !globalThis.exact.gpu) throw Object.assign(new Error("host module did not register: " + src), { transient: false });
+    return value;
+  }, { canRetry: needed }).then((value) => { online.stop(); clearOnline(host, "gpuOnline"); return value; }), (error) => {
+    const reconnected = online.seen();
+    online.stop();
+    if (isTransientLoadError(error) && needed() && reconnected) return loadGpuIfNeeded();
+    console.error("exact gpu:", error);
+    if (isTransientLoadError(error) && needed()) armOnline(host, "gpuOnline", () => loadGpuIfNeeded());
+    else if (!isTransientLoadError(error)) { host.gpuFailedPermanent = true; clearOnline(host, "gpuOnline"); }
+  });
   // @ref LLP 1009 D6
 }
 host.ready = main();

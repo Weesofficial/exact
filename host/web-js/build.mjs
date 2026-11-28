@@ -1069,9 +1069,8 @@ async function lazyModules(roots, omit = []) {
   // These modules were built for this JS runtime and have already passed its
   // production gate. The wasm inventory belongs to a different build.
   const inventory = { ...webHostFiles(),
-    'navigation.js': resolve(gen, 'navigation.js'),
-    'grant-admission.js': resolve(gen, 'grant-admission.js'),
-    'grant-network.js': resolve(gen, 'grant-network.js'),
+    'navigation.js': resolve(gen, 'navigation.js'), 'grant-admission.js': resolve(gen, 'grant-admission.js'), 'grant-network.js': resolve(gen, 'grant-network.js'),
+    ...(hasGpuArtifacts ? { 'gpu-glue.js': resolve(gen, 'gpu-glue.js'), ...(declaredGpu.length ? { 'gpu-modules.js': resolve(gen, 'gpu-modules.js') } : {}) } : {}),
   }, queue = roots.map(name => ({ name, source: inventory[name] })), planned = new Map();
   while (queue.length) {
     const { name, source } = queue.shift();
@@ -1118,6 +1117,10 @@ const storageLazy = files || moduleStorage || extensionFiles || pageModules || s
     extensionFiles && resolve(gen, 'modules.js'), (pageModules || extensionFiles) && resolve(gen, 'native.js')].filter(Boolean)
     .flatMap(seed => literalModuleURLs(readFileSync(seed, 'utf8'))).map(specifier => specifier.replace(/^\.\//, ''))) : null;
 // gpu-glue.js names itself (its timing filter) and the GPU files it loads by names it makes: none of them is renamed.
+if (hasGpuArtifacts) {
+  writeFileSync(resolve(gen, 'gpu-glue.js'), await bundleHostModule(root, 'gpu-glue.js', { production }));
+  if (declaredGpu.length) writeFileSync(resolve(gen, 'gpu-modules.js'), await bundleHostModule(root, 'gpu-modules.js', { production }));
+}
 const gpuLazy = hasGpuArtifacts ? await lazyModules(['gpu-glue.js', ...(declaredGpu.length ? ['gpu-modules.js'] : [])],
   manifest.game?.render?.workers === true ? [] : ['gpu-jobs.js']) : null;
 const copiedNames = new Set([...storageLazy?.values() ?? [], ...gpuLazy?.values() ?? []].flatMap(file => file.names));
