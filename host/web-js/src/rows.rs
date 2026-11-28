@@ -176,11 +176,15 @@ impl Em<'_> {
         let press = parts.css.contains("--exact-press:")
             || binding(StyleId::PressScale)
                 .is_some_and(|b| style::literal(plan, plan.code(b.expr)).is_none());
-        // A clock (LLP 1055.002) plays on the page's timeline: only a drag
-        // timeline's consumer is paused for the drag to seek.
+        // A clock (LLP 1055.002) plays on the page's timeline: only a non-clock
+        // timeline needs `after_shorthand` and (with drag timelines) pausing.
+        // Dynamic expressions (e.g. a state variable) have no literal value and
+        // may evaluate to any timeline at runtime, so treat them as timelines.
         let clock = |s: &str| s.trim_start().starts_with("-exact-clock(");
-        let timeline = binding(StyleId::AnimationTimeline)
-            .is_some_and(|t| style::can_be(plan, plan.code(t.expr), &|s| !clock(s)));
+        let timeline = binding(StyleId::AnimationTimeline).is_some_and(|t| {
+            style::literal(plan, plan.code(t.expr))
+                .map_or(true, |v| v.as_str().is_some_and(|s| !clock(s)))
+        });
         let id = StyleId::from_bit(b.id as u32).ok_or("unknown style row")?;
         let kind = NodeType::from_wire(row.node_type).ok_or("unknown node type")?;
         let leading = (id == StyleId::LineHeight).then(|| {
@@ -519,7 +523,7 @@ impl Em<'_> {
                     String::new(),
                     Some(format!("v=>v==null||/^\\s*none\\s*$/i.test(v)?null:v.split(/,(?![^(]*\\))/).map(p=>p.replace(/[\\w-]+/g,n=>{names}.includes(n)?n+\"-exact-press\":n)).join(\",\")")),
                 )];
-                if timeline {
+                if timeline && self.drag_timelines {
                     w.push(("animation-play-state".into(), String::new(), Some("v=>v==null||/^\\s*none\\s*$/i.test(v)?null:\"paused\"".into())));
                 }
                 w
@@ -599,12 +603,21 @@ impl Em<'_> {
         // range, so read them live again after it.
         if id == StyleId::Animation && timeline {
             let getter = self.bound(i, e, &binding(StyleId::AnimationTimeline).unwrap(), scope)?;
-            for (name, _, map) in &mut writes {
-                if name == "animation-play-state" {
-                    let inner = map.take().unwrap();
-                    *map = Some(format!(
-                        "v=>({inner})(v)==null?null:({play_state})(({getter})())"
-                    ));
+            writes.push((
+                "--exact-animation-play-state".into(),
+                String::new(),
+                Some(style::AUTHORED_PLAY_STATE.into()),
+            ));
+            if !self.drag_timelines {
+                writes.retain(|(name, _, _)| name != "animation-play-state");
+            } else {
+                for (name, _, map) in &mut writes {
+                    if name == "animation-play-state" {
+                        let inner = map.take().unwrap();
+                        *map = Some(format!(
+                            "v=>({inner})(v)==null?null:({play_state})(({getter})())"
+                        ));
+                    }
                 }
             }
             let range = (binding(StyleId::AnimationRange))
@@ -894,6 +907,7 @@ pub(super) fn presence_decls(css: &mut String) -> String {
             .chain(&[
                 "--exact-drag-timeline:",
                 "--exact-animation-timeline:",
+                "--exact-animation-play-state:",
                 // A synced animation's clock (LLP 1055.002), read the same way.
                 "--exact-animation-clock:",
                 "--exact-animation-range:",

@@ -571,8 +571,10 @@ export function css(e, prop, unit, v, rendered) {
     return;
   }
   // The `animation` shorthand resets the longhands a timeline's consumer writes again after it (LLP 1057.003 D5).
+  // Mark them as `null` rather than deleting them so a follow-up `null` (auto/none/clock) does not
+  // `removeProperty('animation-play-state')` and clear a `paused` written by the shorthand.
   if (prop === 'animation')
-    for (const p of ['animation-timeline', 'animation-range', 'animation-play-state']) delete last[p];
+    for (const p of ['animation-timeline', 'animation-range', 'animation-play-state']) last[p] = null;
   // An adopted node's inline style is the renderer's: a value it already shows is not written again (a write
   // restyles and repaints the node). (`transparent` is the color the renderer writes as rgba(0, 0, 0, 0).)
   const valid = t == null || prop.startsWith('--') || t === 'unset' || normal(prop, t);
@@ -585,8 +587,17 @@ export function css(e, prop, unit, v, rendered) {
   const placement = GPU_PLACEMENT && e.exactPlaced && /^(position|transform|transform-origin|z-index|visibility|clip-path)$/.test(prop)
     ? globalThis.exact?.gpu : null;
   placement?.beforeStyle(e);
-  if (t == null) e.style.removeProperty(prop);
-  else {
+  if (t == null) {
+    if (prop === 'animation-play-state' && last.animation) {
+      const s = (Scratch ??= document.createElement('i').style);
+      s.cssText = '';
+      s.setProperty('animation', last.animation);
+      const ps = s.getPropertyValue('animation-play-state');
+      s.cssText = '';
+      if (ps) e.style.setProperty(prop, ps);
+      else e.style.removeProperty(prop);
+    } else e.style.removeProperty(prop);
+  } else {
     // A value not yet seen is probed on the detached style `normal` keeps, so the live node gets only the final
     // write (LLP 1071.001 A8). Every property takes `unset`: one that reads back empty is a property this browser
     // does not have (Chrome's `-moz-osx-font-smoothing`), not a refusal.

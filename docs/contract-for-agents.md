@@ -5649,8 +5649,9 @@ component App
 
 - **Timelines:** `scroll-timeline` (or `-name` and `-axis`) on a scroller is its offset;
   `view-timeline` (`-name`, `-axis`, `-inset`) on any node is that node crossing its nearest
-  scroller. `animation-timeline` names one, or is `scroll()` or `view()`; a sibling's name
-  needs `timeline-scope` on a shared ancestor. One timeline per node and kind.
+  scroller. `animation-timeline` names one, or is `scroll()`, `view()`, or `none` (detached,
+  so the animation never advances on the clock); a sibling's name needs `timeline-scope` on a
+  shared ancestor. One timeline per node and kind.
 - **Ranges:** `animation-range` takes lengths and percentages of the timeline, and on a view
   timeline `cover`, `contain`, `entry`, `exit`, `entry-crossing` and `exit-crossing`, each
   with an optional length or percentage.

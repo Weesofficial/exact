@@ -212,6 +212,16 @@ pub(crate) fn css_text_in(
             (StyleId::Animation, RowValue::Animations(a)) => {
                 if let Some(link) = crate::link::linked().animations.filter(|_| !a.0.is_empty()) {
                     push_text!(&mut out, "animation:{};", (link.list)(a, press || shift));
+                    if a.0.iter().any(|entry| entry.paused) {
+                        out.push_str("--exact-animation-play-state:");
+                        for (i, entry) in a.0.iter().enumerate() {
+                            if i > 0 {
+                                out.push(',');
+                            }
+                            out.push_str(if entry.paused { "paused" } else { "running" });
+                        }
+                        out.push(';');
+                    }
                 }
             }
             // @ref LLP 1063 — not CSS properties: custom properties the page's
@@ -272,11 +282,16 @@ pub(crate) fn css_text_in(
             (StyleId::AnimationTimeline, RowValue::AnimationTimeline(t)) => {
                 if let Some(clock) = t.clock() {
                     push_text!(&mut out, "--exact-animation-clock:{};", clock);
+                } else if t.is_none() {
+                    // `none` detaches the timeline without overriding an
+                    // authored `animation-play-state: paused`; browsers without
+                    // `animation-timeline: none` pause it via index.html.
+                    out.push_str("--exact-animation-timeline:none;animation-timeline:none;");
                 } else if t.anonymous().is_some() {
                     let t = t.css();
                     push_text!(
                         &mut out,
-                        "--exact-animation-timeline:{};animation-timeline:{};animation-play-state:var(--exact-timeline-play,paused);--exact-css-timeline:1;",
+                        "--exact-animation-timeline:{};animation-timeline:{};--exact-css-timeline:1;",
                         t,
                         t
                     );

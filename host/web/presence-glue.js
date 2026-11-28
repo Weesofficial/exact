@@ -284,6 +284,7 @@ function createPresence(root) {
   // ends, and a hold or lift that ends later writes nothing to the ghost (motion-glue.js `letGo`)
   const release = leaving => {
     for (const [el, letGo] of globalThis.exact?.motionHolds ?? []) if (leaving.contains(el)) letGo();
+    for (const fn of globalThis.exact?.timelineReleasers ?? []) fn(leaving);
   };
   let first = new Map();
   // Whether the batch `before` last read changes no tree, which `after` reads for the same batch; a batch `before` did
@@ -509,6 +510,33 @@ function createPresence(root) {
       if (!el?.isConnected || !css) return;
       stop(el);
       release(el);
+      // Read existing animations (inline or class) and their timelines before
+      // `data-exiting` or writing the inline `animation` shorthand overrides them.
+      const splitList = t => {
+        const out = [];
+        let d = 0, start = 0;
+        for (let i = 0; i < t.length; i++) {
+          const c = t[i];
+          if (c === '(') d++;
+          else if (c === ')') d--;
+          else if (c === ',' && !d) { out.push(t.slice(start, i).trim()); start = i + 1; }
+        }
+        out.push(t.slice(start).trim());
+        return out;
+      };
+      const cs = getComputedStyle(el);
+      const existingNames = cs.animationName && cs.animationName !== 'none' ? splitList(cs.animationName) : [];
+      const dur = existingNames.length ? splitList(cs.animationDuration) : [];
+      const tf = existingNames.length ? splitList(cs.animationTimingFunction) : [];
+      const del = existingNames.length ? splitList(cs.animationDelay) : [];
+      const iter = existingNames.length ? splitList(cs.animationIterationCount) : [];
+      const dir = existingNames.length ? splitList(cs.animationDirection) : [];
+      const fill = existingNames.length ? splitList(cs.animationFillMode) : [];
+      const ps = existingNames.length ? splitList(cs.animationPlayState) : [];
+      const tl = cs.animationTimeline ? splitList(cs.animationTimeline) : [];
+      const rs = cs.animationRangeStart ? splitList(cs.animationRangeStart) : [];
+      const re = cs.animationRangeEnd ? splitList(cs.animationRangeEnd) : [];
+      const prevCss = new Set(el.getAnimations().filter(a => a.animationName !== undefined));
       const [box, ranked] = exitBoxes.get(el)?.kept ?? kept(el), s = el.style;
       if (el.parentElement.hasAttribute('data-exact-list-item')) unwrapListItem(el.parentElement);
       const parent = el.parentElement;
@@ -524,6 +552,8 @@ function createPresence(root) {
       // Its authored transitions do not animate it out of flow: the ghost
       // takes its box at once (and a transition still running ends there).
       s.transition = 'none';
+      s.scrollTimelineName = 'none'; s.viewTimelineName = 'none';
+      for (const n of el.querySelectorAll('[style*="--exact-scroll-timeline"],[style*="--exact-view-timeline"]')) { n.style.scrollTimelineName = 'none'; n.style.viewTimelineName = 'none'; }
       s.position = 'absolute'; s.left = `${box[0]}px`; s.top = `${box[1]}px`;
       s.width = `${box[2]}px`; s.height = `${box[3]}px`; s.boxSizing = 'border-box'; s.pointerEvents = 'none';
       // It keeps its paint order among its siblings (LLP 1083.000 D4): its own `z-index`, or level 0 in tree
@@ -540,11 +570,41 @@ function createPresence(root) {
       }
       held.count++;
       if (!held.released) parent.style.setProperty('isolation', 'isolate');
-      // After its own animations, which keep playing: a name it already
-      // plays is a second entry, which starts now.
-      const playing = new Set(el.getAnimations()), list = s.animation;
-      s.animation = list && list !== 'none' ? `${list}, ${css}` : css;
-      const leaving = el.getAnimations().filter(a => a.animationName !== undefined && !playing.has(a));
+      // After its own animations, which keep playing on their timelines: a name
+      // it already plays is a second entry, which starts now on the clock.
+      const prev = existingNames.map((n, i) => [
+        dur[i % dur.length], tf[i % tf.length], del[i % del.length],
+        iter[i % iter.length], dir[i % dir.length], fill[i % fill.length],
+        ps[i % ps.length], n,
+      ].join(' '));
+      const exitCount = splitList(css).length;
+      s.animation = prev.length ? `${prev.join(', ')}, ${css}` : css;
+      if (tl.some(v => v !== 'auto')) {
+        s.animationTimeline = [
+          ...existingNames.map((_, i) => tl[i % tl.length]),
+          ...Array(exitCount).fill('auto'),
+        ].join(', ');
+      }
+      if (rs.some(v => v !== 'normal') || re.some(v => v !== 'normal')) {
+        s.animationRangeStart = [
+          ...existingNames.map((_, i) => rs[i % rs.length]),
+          ...Array(exitCount).fill('normal'),
+        ].join(', ');
+        s.animationRangeEnd = [
+          ...existingNames.map((_, i) => re[i % re.length]),
+          ...Array(exitCount).fill('normal'),
+        ].join(', ');
+      }
+      // CSS Animations 2 §4.3 orders CSSAnimation objects by `animation-name`
+      // list order, whereas duplicate names reuse from the end; restart any
+      // reused finished animation dropped by no-fill timing, then take trailing exits.
+      const allCss0 = el.getAnimations().filter(a => a.animationName !== undefined);
+      const reused = [...prevCss].filter(a => a.playState === 'finished' && !allCss0.includes(a));
+      for (const a of reused) { try { a.currentTime = 0; a.play(); } catch {} }
+      const allCss = reused.length ? el.getAnimations().filter(a => a.animationName !== undefined) : allCss0;
+      const take = Math.min(exitCount, Math.max(0, allCss.length - prevCss.size));
+      const leaving = take ? allCss.slice(allCss.length - take) : [];
+      for (const a of leaving) if (prevCss.has(a)) { try { a.currentTime = 0; a.play(); } catch {} }
       const done = () => {
         // The moves inside it go with it, which no later batch would see
         for (const [child] of [...flips]) if (el.contains(child)) stop(child);

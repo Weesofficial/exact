@@ -4732,7 +4732,7 @@
       "field": "animation_timeline",
       "rare": true,
       "codec": "animation-timeline",
-      "_comment": "@ref LLP 1057.003 D1, D5: CSS `animation-timeline`, `auto | <dashed-ident> | scroll([nearest | root | self] || <axis>) | view(<axis> || <inset>{1,2})` (one value for all the node's animations; a list is refused): the node's animations are held at the named or anonymous timeline's progress (a scroll, view or drag timeline), never played on the clock. @ref LLP 1055.002 D2: a fifth value, `-exact-clock(<ident>)`, keeps them on the clock from a start every animation on that clock timeline shares, a deviation LLP 1001 declares."
+      "_comment": "@ref LLP 1057.003 D1, D5: CSS `animation-timeline`, `auto | none | <dashed-ident> | scroll([nearest | root | self] || <axis>) | view(<axis> || <inset>{1,2})` (one value for all the node's animations; a list is refused): `none` leaves the node's animations with no timeline, and a named or anonymous timeline holds them at that timeline's progress (a scroll, view or drag timeline), never played on the clock. @ref LLP 1055.002 D2: `-exact-clock(<ident>)` keeps them on the clock from a start every animation on that clock timeline shares, a deviation LLP 1001 declares."
     },
     {
       "bit": 149,
