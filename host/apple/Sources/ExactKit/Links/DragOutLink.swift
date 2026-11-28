@@ -7,6 +7,8 @@
 import UIKit
 #elseif os(macOS)
 import AppKit
+#else
+import Foundation
 #endif
 
 /// What the core asks of the capability.
