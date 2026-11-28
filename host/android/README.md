@@ -1005,9 +1005,9 @@ exact2 does the hit testing: it knows each row's box in the surface, ripples the
 
 **What a window gives, and what closes it.** Seen on a Pixel 10 Pro XL (Android 16):
 
-- The alert is its own window above the activity's (`dumpsys window`: `ty=APPLICATION fmt=TRANSPARENT`,
-  `fl=DIM_BEHIND`), with the window manager's dim behind it at Material's 32%, which also darkens the page under the
-  system bars. The menu is `ty=APPLICATION_PANEL`, `fl=WATCH_OUTSIDE_TOUCH`. Each takes the window focus.
+- The alert is its own edge-to-edge non-floating dialog window (`ExactAlertDialog`) above the activity's, painting
+  Material's 32% scrim in a fullscreen backdrop view instead of `FLAG_DIM_BEHIND` so Android's `DisplayPolicy` keeps
+  the page's status and navigation bar appearance over the scrim. The menu is `ty=APPLICATION_PANEL`, `fl=WATCH_OUTSIDE_TOUCH`. Each takes the window focus.
 - Back and Escape go to the window by the system's own routing, and the reader says it was dismissed. A tap outside
   dismisses a menu and does nothing to an alert; a tap on a page button under either presses nothing. An alert's
   cancel, Back and Escape close it and run nothing (unless its `closedby` is `none`); a row's tap closes the
@@ -1027,9 +1027,9 @@ exact2 does the hit testing: it knows each row's box in the surface, ripples the
 
 A surface the reader cannot make (no window to attach to, a kind it does not know) is answered with 9: exact2 closes it, says so in the journal, and the page is live again. exact2's half of that is held by a test; no phone has refused one.
 
-**Motion** is the platform's. The dialog has what the platform gives its window, with nothing set here. Filmed: it
-fades and settles into place over about 180 ms as its scrim fades in, complete in every frame, and leaves in about
-140 ms with its scrim gone in about 50.
+**Motion** respects the system's animation scale and "remove animations". The alert uses a fade-only window
+animation (`res/anim/exact_alert_*`, `res/values/motion.xml`, 180 ms in / 140 ms out) so its fullscreen scrim fades
+without scaling inward from the screen edges.
 
 **The menu is given its motion**, since the platform gives none to a popup it did not place (Charlie's ruling of
 2026-10-12: the window keeps Exact's placement, and Android animates it). Checked on a Pixel 10 Pro XL first:
