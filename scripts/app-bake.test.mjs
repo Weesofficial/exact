@@ -489,14 +489,14 @@ test.each(['rlib', 'staticlib', 'executable', 'windows-executable', 'build-scrip
   } finally { rmSync(root, {recursive:true, force:true}); }
 });
 
-test.each(['wasm', 'executable', 'windows-executable'].flatMap(kind => [null, 'intermediate', 'output/intermediate'].map(split => [kind, split])))('copied %s with build directory %s requires unique compiler evidence', async (kind, split) => {
+test.each(['wasm', 'cdylib', 'dylib', 'windows-cdylib', 'executable', 'windows-executable'].flatMap(kind => [null, 'intermediate', 'output/intermediate'].map(split => [kind, split])))('copied %s with build directory %s requires unique compiler evidence', async (kind, split) => {
   const { compilerPaths, unitDepInfo } = await import('./app.mjs');
   const root = mkdtempSync(resolve(tmpdir(), 'exact-copied-dep-'));
   try {
     const metadata = {target_directory:resolve(root, 'output'), build_directory:resolve(root, split ?? 'output'),
       packages:[{id:'game-id', name:'game-gpu'}]};
-    const executable = kind !== 'wasm', extension = executable ? (kind === 'windows-executable' ? '.exe' : '') : '.wasm';
-    const folder = executable ? 'release' : 'wasm32-unknown-unknown/web', name = 'game_gpu' + extension;
+    const executable = kind.endsWith('executable'), extension = {wasm:'.wasm', cdylib:'.so', dylib:'.dylib', 'windows-cdylib':'.dll', 'windows-executable':'.exe'}[kind] ?? '';
+    const folder = {wasm:'wasm32-unknown-unknown/web', cdylib:'aarch64-linux-android/release', dylib:'aarch64-apple-darwin/release', 'windows-cdylib':'x86_64-pc-windows-msvc/release'}[kind] ?? 'release', name = (kind === 'cdylib' || kind === 'dylib' ? 'libgame_gpu' : 'game_gpu') + extension;
     const dir = resolve(metadata.target_directory, folder), src = resolve(root, executable ? 'gpu/src/main.rs' : 'gpu/src/lib.rs');
     mkdirSync(dir, {recursive:true});
     const artifact = resolve(dir, executable ? 'game-gpu' + extension : name);

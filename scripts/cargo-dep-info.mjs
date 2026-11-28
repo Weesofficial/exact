@@ -552,8 +552,15 @@ export function unitDepInfo(message, workspace, metadata) {
   };
   const sameBytes = (product, file) => product === file || existsSync(product)
     && statSync(product).size === statSync(file).size && readFileSync(product).equals(readFileSync(file));
+  // Only Unix-style library archives/shared libs carry Cargo's `lib` prefix; Windows DLLs, MSVC
+  // `.lib` staticlibs, `.wasm`, and executables do not (so a crate named `libfoo` keeps `libfoo.d`).
+  const isCopiedArtifact = path => /\.(wasm|rlib|a|dylib|so|dll)$/.test(path) || (/\.lib$/.test(path) && !/\.dll\.lib$/.test(path));
+  const hasLibPrefix = (path, executable) => !executable && /\.(rlib|rmeta|a|dylib|so)$/.test(path);
+  const depStem = (unit, stripLib) => (stripLib ? unit.replace(/^lib/, '') : unit);
   for (const file of message.filenames) {
-    const stem = basename(file).replace(/\.[^.]+$/, '').replace(/^lib/, '');
+    const executable = file === message.executable || message.target.kind?.includes('custom-build');
+    const extension = executable ? (file.endsWith('.exe') ? '.exe' : '') : (/\.[^.]+$/.exec(basename(file))?.[0] ?? '');
+    const stem = depStem(extension ? basename(file, extension) : basename(file), hasLibPrefix(file, executable));
     // Selected libraries are copied out of deps; Cargo's sibling summary .d
     // omits env-dep rows. Read rustc's exact unit file, also on a cache hit,
     // when the product beside it is the reported file's bytes: another
@@ -582,8 +589,7 @@ export function unitDepInfo(message, workspace, metadata) {
   // Cargo copies libraries and executables out of deps, and aliases build scripts
   // in their build directory. Match the copied bytes; refuse ambiguous evidence.
   const custom = message.target.kind?.includes('custom-build');
-  // A cdylib (a game's GPU crate: libX.dylib, libX.so) is copied the same way.
-  for (const file of message.filenames.filter(path => /\.(rlib|a|dylib|so)$/.test(path) || path === message.executable || custom)) {
+  for (const file of message.filenames.filter(path => isCopiedArtifact(path) || path === message.executable || custom)) {
     const directory = custom ? dirname(intermediate(file)) : resolve(dirname(intermediate(file)), 'deps');
     if (!existsSync(directory)) continue;
     const executable = custom || file === message.executable;
@@ -592,7 +598,7 @@ export function unitDepInfo(message, workspace, metadata) {
     const bytes = readFileSync(file), matches = [];
     for (const name of readdirSync(directory)) {
       if (!name.startsWith(stem + '-') || (!executable && !name.endsWith(extension))) continue;
-      const unit = executable ? (extension ? name.slice(0, -extension.length) : name) : name.slice(3, -extension.length);
+      const unit = depStem(extension ? name.slice(0, -extension.length) : name, hasLibPrefix(file, executable));
       if (!/^[a-f0-9]+$/.test(unit.slice(unit.lastIndexOf('-') + 1))) continue;
       const product = resolve(directory, name);
       if (statSync(product).size !== bytes.length || !readFileSync(product).equals(bytes)) continue;
@@ -603,10 +609,10 @@ export function unitDepInfo(message, workspace, metadata) {
     const found = resolveMatch(matches, message.target.name);
     if (found) return found;
   }
-  // Cargo 1.100 puts units under build/<package>/<hash>/out,
-  // reporting only the copied product, including executables.
+  // Cargo 1.100 places units under build/<package>/<hash>/out; copied products
+  // (libraries and executables) report only their copied path.
   const pkg = metadata?.packages?.find(p => p.id === message.package_id);
-  for (const file of message.filenames.filter(path => /\.(wasm|a|rlib)$/.test(path) || path === message.executable)) {
+  for (const file of message.filenames.filter(path => isCopiedArtifact(path) || path === message.executable)) {
     if (!pkg) continue;
     const directory = resolve(dirname(intermediate(file)), 'build', pkg.name);
     if (!existsSync(directory)) continue;
@@ -620,7 +626,7 @@ export function unitDepInfo(message, workspace, metadata) {
       for (const name of readdirSync(out).filter(name => name === `${stem}${extension}` || name === `${stem}-${hash}${extension}`)) {
         const product = resolve(out, name);
         const unit = extension ? name.slice(0, -extension.length) : name;
-        const candidate = resolve(out, (executable || extension === '.wasm' ? unit : unit.replace(/^lib/, '')) + '.d');
+        const candidate = resolve(out, depStem(unit, hasLibPrefix(file, executable)) + '.d');
         if (!existsSync(candidate) || statSync(product).size !== bytes.length || !readFileSync(product).equals(bytes)) continue;
         if (names(readFileSync(candidate, 'utf8'), candidate)) matches.push({ candidate, linked: sameFile(product, file) });
       }
