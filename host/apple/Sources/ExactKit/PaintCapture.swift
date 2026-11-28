@@ -128,12 +128,11 @@ extension Capture {
             var children = branches[ObjectIdentifier(source)] ?? []
             // The CPU renderer cannot replay glass content portals. Paint
             // its public content view above the copied effect layers.
-            if #available(macOS 26, *), let glass = owner as? NSGlassEffectView, let content = glass.contentView?.layer {
-                var branch = content
-                while let parent = branch.superlayer, parent !== source { branch = parent }
-                if branch.superlayer === source, let at = children.firstIndex(where: { $0 === branch }) {
-                    children.remove(at: at); children.append(branch)
-                }
+            if #available(macOS 26, *),
+               let content = (owner as? NSGlassEffectView)?.contentView?.layer ?? (owner as? NSGlassEffectContainerView)?.contentView?.layer,
+               let branch = Capture.glassContentBranch(of: source, content: content),
+               let at = children.firstIndex(where: { $0 === branch }) {
+                children.remove(at: at); children.append(branch)
             }
             #else
             // Flat leaves have no UIView: merge their tree slots with the
@@ -221,6 +220,13 @@ extension Capture {
     }
 
     #if os(macOS)
+    /// The direct sublayer of a glass host's layer that contains its public `contentView`'s layer.
+    static func glassContentBranch(of hostLayer: CALayer, content: CALayer?) -> CALayer? {
+        guard var branch = content else { return nil }
+        while let parent = branch.superlayer, parent !== hostLayer { branch = parent }
+        return branch.superlayer === hostLayer ? branch : nil
+    }
+
     /// Whether a layer shows a backing store AppKit drew a view into, not a
     /// picture of Exact's (an image, a surface).
     static func borrowsBackingStore(_ layer: CALayer) -> Bool {

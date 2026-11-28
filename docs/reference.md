@@ -3020,10 +3020,15 @@ its presented frame. An iframe or a snapshot-capable native view supplies
 its guest picture. Other Metal and OpenGL layers need a snapshot from
 their owner. Video contributes the displayed frame when the player makes
 it readable. Playing or protected video can withhold its frame, and a
-live camera preview exposes no displayed buffer. If a point needs missing
-pixels, the reply names the node and the reason. An opaque cover can still
-be sampled. On iOS 27 the layer renderer clips native extended-range
-gradients and omits layer shadows.
+live camera preview exposes no displayed buffer. On macOS, native glass
+(`NSGlassEffectView`) has no CPU pixels, so its content composites over an
+unavailable backdrop: opaque content samples normally while bare or
+translucent glass pixels refuse. Inside a glass group (`NSGlassEffectContainerView`),
+direct glass members composite above ordinary group siblings and potential merge bridges
+within `spacing` refuse conservatively. If a point needs missing pixels, the reply
+names the node and the reason. An opaque cover can still be sampled. On iOS 27
+the layer renderer clips native extended-range gradients and omits layer
+shadows.
 
 On iOS and the JS web target, `check` and `verify` count the part of
 `-exact-hit-slop` that accepts a press. A clip cuts that region, and a front

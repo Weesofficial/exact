@@ -14,10 +14,153 @@ private struct SamplePicture {
     let layer: CALayer
     let area: CGRect
     let image: CGImage?
-    let refusal: String
+    let refusal: String?
     let replacesSubviews: Bool
     let clip: Bool
+    let hiddenSublayers: [CALayer]
+    let cornerRadius: CGFloat
 }
+
+private struct SampleProbe {
+    let layer: CALayer
+    let area: CGRect
+    let reason: String
+    let setColor: (CGColor) -> Void
+}
+
+#if os(macOS)
+private struct GlassMemberSample {
+    let layer: CALayer
+    let contentBranch: CALayer?
+    let cornerRadius: CGFloat
+    let refusal: String?
+}
+
+private struct GlassContainerSample {
+    let layer: CALayer
+    let spacing: CGFloat
+    let refusal: String
+    let hiddenSublayers: [CALayer]
+    var topLevelMembers: [GlassMemberSample]
+    var backdropMembers: [GlassMemberSample]
+    var bridgeMembers: [(layer: CALayer, cornerRadius: CGFloat)]
+}
+
+private func copyLayerGeometry(from src: CALayer, to dst: CALayer) {
+    dst.bounds = src.bounds
+    dst.position = src.position
+    dst.anchorPoint = src.anchorPoint
+    dst.anchorPointZ = src.anchorPointZ
+    dst.isGeometryFlipped = src.isGeometryFlipped
+    dst.transform = src.transform
+    dst.sublayerTransform = src.sublayerTransform
+    dst.isDoubleSided = src.isDoubleSided
+}
+
+private func copyLayerShadow(from src: CALayer, to dst: CALayer) {
+    dst.shadowOpacity = src.shadowOpacity
+    dst.shadowColor = src.shadowColor
+    dst.shadowOffset = src.shadowOffset
+    dst.shadowRadius = src.shadowRadius
+    dst.shadowPath = src.shadowPath
+}
+
+/// Builds a lightweight geometry-only mirror chain from `host` (exclusive) down to `target`
+/// (inclusive), placing `leaf` at `target`. Preserves full 3D perspective and flips without
+/// reparenting any live layer.
+private func makeGeometryMirror(from host: CALayer, to target: CALayer, leaf: CALayer) -> CALayer? {
+    var chain: [CALayer] = []
+    var cur: CALayer? = target
+    while let c = cur, c !== host {
+        chain.append(c)
+        cur = c.superlayer
+    }
+    guard cur === host, !chain.isEmpty else { return nil }
+    let ordered = Array(chain.reversed())
+    var parent: CALayer?
+    var top: CALayer?
+    for i in 0..<ordered.count {
+        let w = (i == ordered.count - 1) ? leaf : CALayer()
+        copyLayerGeometry(from: ordered[i], to: w)
+        if let p = parent { p.addSublayer(w) } else { top = w }
+        parent = w
+    }
+    return top
+}
+
+/// Renders a live layer directly at the geometry established by an enclosing mirror chain.
+private final class GlassBranchReplayLayer: CALayer {
+    weak var branch: CALayer?
+
+    init(branch: CALayer) {
+        self.branch = branch
+        super.init()
+        copyLayerGeometry(from: branch, to: self)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func render(in ctx: CGContext) {
+        guard let branch, !branch.isHidden, branch.opacity > 0 else { return }
+        branch.render(in: ctx)
+    }
+}
+
+/// Renders a masked grouped `NSGlassEffectView`'s backdrop probe through its live mask at the
+/// mirror chain's 3D geometry, keeping its public content suppressed for the shared glass pass.
+private final class GlassMaskedBackdropReplayLayer: CALayer {
+    weak var target: CALayer?
+    weak var contentBranch: CALayer?
+    let stand: CALayer
+    let replayOpacity: Float
+
+    init(target: CALayer, contentBranch: CALayer?, stand: CALayer, replayOpacity: Float) {
+        self.target = target
+        self.contentBranch = contentBranch
+        self.stand = stand
+        self.replayOpacity = replayOpacity
+        super.init()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func render(in ctx: CGContext) {
+        guard let target else { return }
+        let branchSaved = contentBranch?.opacity
+        if let contentBranch, contentBranch.opacity > 0 { contentBranch.opacity = 0 }
+        let saved = target.opacity
+        if saved == 0 { target.opacity = replayOpacity }
+        target.insertSublayer(stand, at: 0)
+        target.render(in: ctx)
+        stand.removeFromSuperlayer()
+        if target.opacity == replayOpacity { target.opacity = saved }
+        if let contentBranch, let branchSaved, contentBranch.opacity == 0 { contentBranch.opacity = branchSaved }
+    }
+}
+
+/// Renders a masked grouped `NSGlassEffectView`'s content through its live mask at the mirror
+/// chain's 3D geometry above the container's shared glass layer.
+private final class GlassMaskedContentReplayLayer: CALayer {
+    weak var target: CALayer?
+    let replayOpacity: Float
+
+    init(target: CALayer, replayOpacity: Float) {
+        self.target = target
+        self.replayOpacity = replayOpacity
+        super.init()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func render(in ctx: CGContext) {
+        guard let target else { return }
+        let saved = target.opacity
+        if saved == 0 { target.opacity = replayOpacity }
+        target.render(in: ctx)
+        if target.opacity == replayOpacity { target.opacity = saved }
+    }
+}
+#endif
 
 extension Agent {
     func sample(_ req: [String: Any]) -> [String: Any] {
@@ -90,7 +233,7 @@ extension Agent {
         let scale = view.window?.backingScaleFactor ?? max(1, layer.contentsScale)
         let backing = CGAffineTransform(translationX: area.minX, y: area.minY)
         var mapping = CGAffineTransform(translationX: -area.minX, y: -area.minY)
-        if presenter.navigation.stackSplit.active, !view.isFlipped {
+        if presenter.navigation.stackSplit.active || presenter.navigation.stackSplit.hasInspector, !view.isFlipped {
             mapping = mapping.translatedBy(x: 0, y: view.bounds.height).scaledBy(x: 1, y: -1)
         }
         #endif
@@ -116,8 +259,9 @@ extension Agent {
         ctx.scaleBy(x: scale, y: -scale)
         ctx.concatenate(backing)
         ctx.concatenate(mapping)
+        let baseCTM = ctx.ctm
+        let pixelRects = pixels.map { CGRect(x: $0.x - box.minX, y: box.maxY - $0.y - 1, width: 1, height: 1) }
         CATransaction.flush()
-        let pictures = samplePictures(in: layer, guests: guests, stable: stableGuests)
         let offsets = pixels.map { (Int($0.y - box.minY) * w + Int($0.x - box.minX)) * 4 }
         func read() -> [[Float]] {
             memset(data, 0, ctx.bytesPerRow * h)
@@ -128,7 +272,18 @@ extension Agent {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         var restore: [() -> Void] = []
         defer { for undo in restore.reversed() { undo() }; CATransaction.commit() }
+        // Temporarily zero opacity within the disabled-actions transaction and restore on exit,
+        // keeping `isHidden` untouched.
+        @discardableResult
+        func suppress(_ target: CALayer) -> Float? {
+            let saved = target.opacity
+            guard saved > 0 else { return nil }
+            target.opacity = 0
+            restore.append { if target.opacity == 0 { target.opacity = saved } }
+            return saved
+        }
         // render(in:) visits siblings in array order. The compositor also uses zPosition.
+        // Sort before collecting so grouped glass members keep paint order.
         func order(_ parent: CALayer) {
             guard !parent.isHidden, parent.opacity > 0 else { return }
             if let mask = parent.mask { order(mask) }
@@ -142,23 +297,32 @@ extension Agent {
             children.forEach(order)
         }
         order(layer)
-        var unknown: [(CALayer, String)] = []
-        for picture in pictures {
+        let collected = samplePictures(in: layer, guests: guests, stable: stableGuests)
+        // Suppress unavailable platform-effect subtrees (AppKit's glass effect/portal layers)
+        // so CPU render(in:) cannot paint white placeholders or destIn wipes over content.
+        for picture in collected.pictures {
+            for child in picture.hiddenSublayers { suppress(child) }
+        }
+        var unknown: [SampleProbe] = []
+        for picture in collected.pictures {
+            guard let refusal = picture.refusal, !picture.area.isEmpty else { continue }
             let source = picture.layer
             if picture.replacesSubviews {
                 let background = source.backgroundColor, contents = source.contents, border = source.borderWidth
                 source.backgroundColor = nil; source.contents = nil; source.borderWidth = 0
                 restore.append { source.backgroundColor = background; source.contents = contents; source.borderWidth = border }
-                let visible = (source.sublayers ?? []).filter { !$0.isHidden }
-                for child in visible { child.isHidden = true }
-                restore.append { for child in visible { child.isHidden = false } }
+                for child in source.sublayers ?? [] { suppress(child) }
             }
             let stand = CALayer()
             stand.frame = picture.area
             stand.contents = picture.image
+            if picture.cornerRadius > 0 {
+                stand.cornerRadius = picture.cornerRadius
+                stand.cornerCurve = .continuous
+            }
             if picture.image == nil {
                 stand.backgroundColor = CGColor(gray: 1, alpha: 1)
-                unknown.append((stand, picture.refusal))
+                unknown.append(SampleProbe(layer: stand, area: stand.bounds, reason: refusal) { stand.backgroundColor = $0 })
             }
             if picture.clip {
                 let clip = CALayer()
@@ -173,15 +337,181 @@ extension Agent {
                 restore.append { stand.removeFromSuperlayer() }
             }
         }
+        #if os(macOS)
+        // Elevate direct members and conservative merge bridges of each NSGlassEffectContainerView
+        // above ordinary group siblings (LLP 1053.000.000 D5), keeping all grouped glass backdrops
+        // and bridges beneath all grouped member content, and below layers outside the group.
+        for group in collected.glassContainers {
+            let containerLayer = group.layer
+            for child in group.hiddenSublayers { suppress(child) }
+            guard !group.topLevelMembers.isEmpty else { continue }
+            let overlay = CALayer()
+            overlay.bounds = containerLayer.bounds
+            overlay.anchorPoint = .zero
+            overlay.position = containerLayer.bounds.origin
+            overlay.isGeometryFlipped = false
+            // Attach overlay first so `convert(..., to: overlay)` cancels containerLayer.sublayerTransform.
+            containerLayer.addSublayer(overlay)
+            restore.append { overlay.removeFromSuperlayer() }
+            if group.bridgeMembers.count >= 2 {
+                let entries = group.bridgeMembers.compactMap { entry -> (rect: CGRect, radius: CGFloat)? in
+                    let bounds = entry.layer.bounds
+                    guard !bounds.isEmpty else { return nil }
+                    let r = entry.layer.convert(bounds, to: overlay)
+                    guard !r.isNull, !r.isInfinite, !r.isEmpty,
+                          r.minX.isFinite, r.minY.isFinite, r.width.isFinite, r.height.isFinite else { return nil }
+                    let scale = max(r.width / bounds.width, r.height / bounds.height)
+                    let radius = min(max(0, entry.cornerRadius) * scale, min(r.width, r.height) / 2)
+                    return (r, radius)
+                }
+                let s = group.spacing
+                let path = CGMutablePath()
+                for i in 0..<entries.count {
+                    let a = entries[i]
+                    for j in (i + 1)..<entries.count {
+                        let b = entries[j]
+                        if a.rect.contains(b.rect) || b.rect.contains(a.rect) {
+                            let (outer, inner) = a.rect.contains(b.rect) ? (a, b) : (b, a)
+                            let reach = max(s, inner.radius)
+                            guard reach > 0 else { continue }
+                            let bridge = inner.rect.insetBy(dx: -reach, dy: -reach).intersection(outer.rect)
+                            if !bridge.isNull, !bridge.isEmpty { path.addRect(bridge) }
+                            continue
+                        }
+                        guard a.rect.minX - s <= b.rect.maxX, b.rect.minX - s <= a.rect.maxX,
+                              a.rect.minY - s <= b.rect.maxY, b.rect.minY - s <= a.rect.maxY else { continue }
+                        let reach = max(s, max(a.radius, b.radius))
+                        guard reach > 0 else { continue }
+                        let bridge = a.rect.insetBy(dx: -reach, dy: -reach)
+                            .intersection(b.rect.insetBy(dx: -reach, dy: -reach))
+                            .intersection(a.rect.union(b.rect))
+                        if !bridge.isNull, !bridge.isEmpty { path.addRect(bridge) }
+                    }
+                }
+                if !path.isEmpty {
+                    let bridges = CAShapeLayer()
+                    bridges.bounds = overlay.bounds
+                    bridges.anchorPoint = .zero
+                    bridges.position = overlay.bounds.origin
+                    bridges.isGeometryFlipped = false
+                    bridges.fillRule = .nonZero
+                    bridges.path = path
+                    bridges.fillColor = CGColor(gray: 1, alpha: 1)
+                    overlay.addSublayer(bridges)
+                    unknown.append(SampleProbe(layer: bridges, area: path.boundingBox, reason: group.refusal) { bridges.fillColor = $0 })
+                }
+            }
+            var replayed: [(member: GlassMemberSample, opacity: Float)] = []
+            var savedOpacities: [ObjectIdentifier: Float] = [:]
+            for member in group.topLevelMembers {
+                guard let savedOpacity = suppress(member.layer) else { continue }
+                replayed.append((member, savedOpacity))
+                savedOpacities[ObjectIdentifier(member.layer)] = savedOpacity
+            }
+            // Shared glass backdrop pass (both direct and non-isolated nested members).
+            for member in group.backdropMembers {
+                guard let refusal = member.refusal, !member.layer.bounds.isEmpty else { continue }
+                let stand = CALayer()
+                stand.frame = member.layer.bounds
+                stand.backgroundColor = CGColor(gray: 1, alpha: 1)
+                if member.cornerRadius > 0 {
+                    stand.cornerRadius = member.cornerRadius
+                    stand.cornerCurve = .continuous
+                }
+                let leaf: CALayer
+                let probeLayer: CALayer
+                let probeArea: CGRect
+                if member.layer.mask == nil {
+                    let clip = CALayer()
+                    clip.cornerRadius = member.layer.cornerRadius
+                    clip.cornerCurve = member.layer.cornerCurve
+                    clip.masksToBounds = member.layer.masksToBounds
+                    copyLayerShadow(from: member.layer, to: clip)
+                    clip.addSublayer(stand)
+                    leaf = clip
+                    probeLayer = stand
+                    probeArea = stand.bounds
+                } else {
+                    let opacity = savedOpacities[ObjectIdentifier(member.layer)] ?? member.layer.opacity
+                    leaf = GlassMaskedBackdropReplayLayer(
+                        target: member.layer, contentBranch: member.contentBranch,
+                        stand: stand, replayOpacity: opacity
+                    )
+                    probeLayer = member.layer
+                    probeArea = member.layer.bounds
+                }
+                if let mirror = makeGeometryMirror(from: containerLayer, to: member.layer, leaf: leaf) {
+                    overlay.addSublayer(mirror)
+                    unknown.append(SampleProbe(layer: probeLayer, area: probeArea, reason: refusal) {
+                        stand.backgroundColor = $0
+                    })
+                }
+            }
+            // Shared content pass above all grouped glass backdrops and bridges.
+            for item in replayed {
+                let member = item.member
+                let leaf: CALayer
+                if member.layer.mask == nil {
+                    guard let branch = member.contentBranch else { continue }
+                    let clip = CALayer()
+                    clip.cornerRadius = member.layer.cornerRadius
+                    clip.cornerCurve = member.layer.cornerCurve
+                    clip.masksToBounds = member.layer.masksToBounds
+                    copyLayerShadow(from: member.layer, to: clip)
+                    clip.addSublayer(GlassBranchReplayLayer(branch: branch))
+                    leaf = clip
+                } else {
+                    leaf = GlassMaskedContentReplayLayer(target: member.layer, replayOpacity: item.opacity)
+                }
+                if let mirror = makeGeometryMirror(from: containerLayer, to: member.layer, leaf: leaf) {
+                    overlay.addSublayer(mirror)
+                }
+            }
+        }
+        #endif
         let values = read()
+        func affectsSampledPixels(_ probe: SampleProbe) -> Bool {
+            // A probe rendered as a sublayer of `probe.layer` (such as a masked grouped member's stand)
+            // inherits `probe.layer.sublayerTransform`, which `probe.layer.convert(bounds, to:)` omits.
+            if !CATransform3DIsIdentity(probe.layer.sublayerTransform) { return true }
+            var reachedRoot = probe.layer === layer
+            var current: CALayer? = probe.layer
+            while let node = current {
+                // Non-affine 3D transforms can diverge between convert(_:to:) and render(in:);
+                // shadows and filters can also paint outside the probe's own bounds.
+                if !CATransform3DIsAffine(node.transform) || !CATransform3DIsAffine(node.sublayerTransform)
+                    || node.shadowOpacity > 0 || !(node.filters?.isEmpty ?? true) { return true }
+                if node === layer { reachedRoot = true; break }
+                current = node.superlayer
+            }
+            guard reachedRoot else { return true }
+            let inRoot = probe.layer.convert(probe.area, to: layer)
+            guard !inRoot.isNull, !inRoot.isInfinite,
+                  inRoot.minX.isFinite, inRoot.minY.isFinite, inRoot.width.isFinite, inRoot.height.isFinite else { return true }
+            let inBitmap = inRoot.applying(baseCTM)
+            guard !inBitmap.isNull, !inBitmap.isInfinite,
+                  inBitmap.minX.isFinite, inBitmap.minY.isFinite, inBitmap.width.isFinite, inBitmap.height.isFinite else { return true }
+            let expanded = inBitmap.insetBy(dx: -2, dy: -2)
+            return pixelRects.contains { expanded.intersects($0) }
+        }
         // A missing picture only matters where it contributes. The same compositor
         // resolves masks, rounded clips and occlusion for both the probe and the pixel.
-        for (stand, reason) in unknown {
+        let active = unknown.filter(affectsSampledPixels)
+        for probe in active {
             for alpha in [CGFloat(0), 1] {
-                stand.backgroundColor = CGColor(gray: 0, alpha: alpha)
-                if read() != values { return ["error": reason] }
+                probe.setColor(CGColor(gray: 0, alpha: alpha))
+                if read() != values { return ["error": probe.reason] }
             }
-            stand.backgroundColor = CGColor(gray: 1, alpha: 1)
+            probe.setColor(CGColor(gray: 1, alpha: 1))
+        }
+        // Also vary all active probes together so overlapping unavailable layers inside an alpha mask
+        // cannot shield one another while varied individually.
+        if active.count > 1 {
+            for alpha in [CGFloat(0), 1] {
+                for probe in active { probe.setColor(CGColor(gray: 0, alpha: alpha)) }
+                if read() != values { return ["error": active[0].reason] }
+            }
+            for probe in active { probe.setColor(CGColor(gray: 1, alpha: 1)) }
         }
         // Apple blends SDR layers in encoded sRGB. Convert after blending so half
         // black over red has the displayed intensity while P3 and HDR remain extended.
@@ -196,7 +526,13 @@ extension Agent {
         return ["space": "extended-linear-srgb", "values": result]
     }
 
-    private func samplePictures(in root: CALayer, guests: [UInt32: ExactWebImage], stable: Bool) -> [SamplePicture] {
+    #if os(macOS)
+    private typealias CollectedSamples = (pictures: [SamplePicture], glassContainers: [GlassContainerSample])
+    #else
+    private typealias CollectedSamples = (pictures: [SamplePicture], Void)
+    #endif
+
+    private func samplePictures(in root: CALayer, guests: [UInt32: ExactWebImage], stable: Bool) -> CollectedSamples {
         var owners: [ObjectIdentifier: NodeView] = [:]
         var guestLayers: [ObjectIdentifier: NodeView] = [:]
         func guest(_ view: PaintView, _ node: NodeView) {
@@ -210,7 +546,10 @@ extension Agent {
             if let node = presenter.views[id] { guest(view, node) }
         }
         var pictures: [SamplePicture] = []
-        func walk(_ layer: CALayer, owner: NodeView?) {
+        #if os(macOS)
+        var glassContainers: [GlassContainerSample] = []
+        #endif
+        func walk(_ layer: CALayer, owner: NodeView?, activeContainer: Int?, insideGlass: Bool) {
             guard !layer.isHidden, layer.opacity > 0 else { return }
             let key = ObjectIdentifier(layer)
             let node = owners[key] ?? owner
@@ -259,19 +598,77 @@ extension Agent {
                 reason = "the live camera preview does not expose its displayed frame"
             }
             #if os(macOS)
-            if layer is CAOpenGLLayer { reason = "the OpenGL layer does not expose its displayed frame" }
+            if !replaces, reason == nil {
+                // Native glass (LLP 1100 D12): AppKit puts its portal/effect subtree after `contentView`.
+                // In CPU render(in:), untinted glass paints opaque white over content and tinted glass applies
+                // a destIn compositing filter that clears earlier pixels. Hide the effect subtree, keep the
+                // public content branch, and probe the glass bounds below it so opaque content samples cleanly
+                // while bare or translucent glass pixels refuse.
+                if #available(macOS 26.0, *), let glass = layer.delegate as? NSGlassEffectView {
+                    let branch = Capture.glassContentBranch(of: layer, content: glass.contentView?.layer)
+                    let hidden = (layer.sublayers ?? []).filter { !$0.isHidden && $0.opacity > 0 && $0 !== branch }
+                    let ownerName = node.map { $0.props["testId"] ?? "\($0.kind) #\($0.id)" } ?? "the session"
+                    let radius = max(0, glass.cornerRadius)
+                    let refusal = layer.bounds.isEmpty ? nil : "sample \(ownerName): the window server composites native glass"
+                    if let idx = activeContainer {
+                        if !hidden.isEmpty {
+                            pictures.append(SamplePicture(
+                                layer: layer, area: .zero, image: nil, refusal: nil,
+                                replacesSubviews: false, clip: false, hiddenSublayers: hidden, cornerRadius: 0
+                            ))
+                        }
+                        let member = GlassMemberSample(
+                            layer: layer, contentBranch: branch, cornerRadius: radius, refusal: refusal
+                        )
+                        if !insideGlass { glassContainers[idx].topLevelMembers.append(member) }
+                        glassContainers[idx].backdropMembers.append(member)
+                        glassContainers[idx].bridgeMembers.append((layer, radius))
+                    } else {
+                        pictures.append(SamplePicture(
+                            layer: layer, area: layer.bounds, image: nil, refusal: refusal,
+                            replacesSubviews: false, clip: false, hiddenSublayers: hidden, cornerRadius: radius
+                        ))
+                    }
+                    if let mask = layer.mask { walk(mask, owner: node, activeContainer: nil, insideGlass: false) }
+                    if let branch { walk(branch, owner: node, activeContainer: activeContainer, insideGlass: true) }
+                    return
+                }
+                if #available(macOS 26.0, *), let container = layer.delegate as? NSGlassEffectContainerView {
+                    let branch = Capture.glassContentBranch(of: layer, content: container.contentView?.layer)
+                    let hidden = (layer.sublayers ?? []).filter { !$0.isHidden && $0.opacity > 0 && $0 !== branch }
+                    let ownerName = node.map { $0.props["testId"] ?? "\($0.kind) #\($0.id)" } ?? "the session"
+                    let spacing = container.spacing.isFinite ? max(0, container.spacing) : 0
+                    let idx = glassContainers.count
+                    glassContainers.append(GlassContainerSample(
+                        layer: layer, spacing: spacing,
+                        refusal: "sample \(ownerName): the window server composites native glass",
+                        hiddenSublayers: hidden, topLevelMembers: [], backdropMembers: [], bridgeMembers: []
+                    ))
+                    if let mask = layer.mask { walk(mask, owner: node, activeContainer: nil, insideGlass: false) }
+                    if let branch { walk(branch, owner: node, activeContainer: idx, insideGlass: false) }
+                    return
+                }
+                if layer is CAOpenGLLayer { reason = "the OpenGL layer does not expose its displayed frame" }
+            }
             #else
-            if layer is CAEAGLLayer { reason = "the OpenGL layer does not expose its displayed frame" }
+            if !replaces, reason == nil, layer is CAEAGLLayer { reason = "the OpenGL layer does not expose its displayed frame" }
             #endif
             if let reason, !area.isEmpty {
                 let owner = node.map { $0.props["testId"] ?? "\($0.kind) #\($0.id)" } ?? "the session"
-                pictures.append(SamplePicture(layer: layer, area: area, image: image, refusal: "sample \(owner): \(reason)", replacesSubviews: replaces, clip: clip))
+                pictures.append(SamplePicture(
+                    layer: layer, area: area, image: image, refusal: "sample \(owner): \(reason)",
+                    replacesSubviews: replaces, clip: clip, hiddenSublayers: [], cornerRadius: 0
+                ))
             }
-            if let mask = layer.mask { walk(mask, owner: node) }
-            if !replaces { for child in layer.sublayers ?? [] { walk(child, owner: node) } }
+            if let mask = layer.mask { walk(mask, owner: node, activeContainer: nil, insideGlass: false) }
+            if !replaces { for child in layer.sublayers ?? [] { walk(child, owner: node, activeContainer: activeContainer, insideGlass: insideGlass) } }
         }
-        walk(root, owner: nil)
-        return pictures
+        walk(root, owner: nil, activeContainer: nil, insideGlass: false)
+        #if os(macOS)
+        return (pictures, glassContainers)
+        #else
+        return (pictures, ())
+        #endif
     }
 
     private static let videoContext = CIContext()
