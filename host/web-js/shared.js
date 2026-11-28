@@ -36,6 +36,8 @@ let pending = null; // the tails waiting for a transition's update
 let running = null; // the transition animating, if any
 let style = null;
 let serial = 0;
+let transitionId = 0;
+let latestReady = Promise.resolve();
 
 // What waits for the commits a transition holds to have run (input-glue.js: a tapped file input's own picker).
 (globalThis.exact ??= {}).afterCommit = run => { if (pending) pending.after.push(run); else run(); };
@@ -134,79 +136,166 @@ function routeChanges(before, after) {
   return out;
 }
 
+/** Holds `inflight.n` and `exact.viewTransition()` until both `t.ready` settles and the deferred tails have run. */
+function defer(tails, inflight, run, isFade = false, initialAfter = []) {
+  const ownPending = (pending = Object.assign(tails, { after: [...initialAfter], isFade, handoff: null }));
+  let drained = false, readyDone = false, held = true, superseded = false, resolveDrain, resolveHandoff;
+  const drainedPromise = new Promise(r => { resolveDrain = r; });
+  const handoffPromise = new Promise(r => { resolveHandoff = r; });
+  const releaseInflight = () => {
+    if (held && drained && readyDone) {
+      held = false;
+      inflight.n--;
+    }
+  };
+  inflight.n++;
+  const drain = () => {
+    if (pending !== ownPending || drained) return;
+    const list = ownPending;
+    let firstErr, threw = false, idx = 0;
+    const fail = err => { if (!threw) { firstErr = err; threw = true; } else console.error(err); };
+    try {
+      // Keep `pending === list` while draining so reentrant cuts queue at the back
+      // in FIFO order instead of overtaking already-queued tails, while a reentrant
+      // fade promotion moves `pending` off `list` and carries remaining tails forward.
+      while (list.length) {
+        const item = list.shift();
+        try {
+          run(item, idx++);
+        } catch (err) {
+          fail(err);
+        }
+        if (pending !== list) break;
+      }
+    } finally {
+      if (pending === list) pending = null;
+      try {
+        for (const f of list) if (!f.ran) { try { f.release(); } catch (err) { fail(err); } }
+        for (const f of list.after) { try { f(); } catch (err) { fail(err); } }
+      } finally {
+        drained = true;
+        resolveDrain();
+        releaseInflight();
+      }
+    }
+    if (threw) throw firstErr;
+  };
+  const onHandoff = cleanup => {
+    ownPending.handoff = () => {
+      superseded = true;
+      try { cleanup(); } catch (err) { console.error(err); }
+      drained = true;
+      resolveDrain();
+      resolveHandoff();
+      readyDone = true;
+      releaseInflight();
+    };
+  };
+  const settleReady = (t, after) => {
+    let ownReady;
+    const ready = (ownReady = Promise.race([t.ready, handoffPromise])
+      .then(() => {
+        for (const f of after ?? []) {
+          if (superseded || Link.poisoned?.()) break;
+          try { f(); } catch (err) { console.error(err); }
+        }
+      }, () => {})
+      .then(() => drainedPromise)
+      .finally(() => { readyDone = true; releaseInflight(); })
+      .then(() => (latestReady !== ownReady ? latestReady : undefined)));
+    latestReady = ready;
+    (globalThis.exact ??= {}).viewTransition = () => latestReady;
+  };
+  const abort = () => { try { drain(); } finally { readyDone = true; releaseInflight(); } };
+  const fallback = () => { try { drain(); } catch (e) { console.error(e); } };
+  return { drain, onHandoff, settleReady, abort, fallback };
+}
+
+/** Whether `owner` is still the visible active top route of a shown stack under `root`. */
+function stillTop(root, owner) {
+  if (!root || !owner.isConnected) return false;
+  for (let el = owner; el && el !== root; el = el.parentElement) {
+    if (el.hidden || el.getAttribute?.('aria-hidden') === 'true'
+      || el.style?.visibility === 'hidden' || el.style?.display === 'none') return false;
+  }
+  for (const stack of shownStacks(root).values()) if (stack.at(-1) === owner) return true;
+  return false;
+}
+
 /** After a commit's flush that needed no transition: a push whose route declares its entrance plays it, in a
  * transition started now. */
 function entrance(before, root, inflight, after) {
+  if (pending || Link.poisoned?.()) return;
   const change = routeChanges(before, shownStacks(root)).find(c => c.which === 'new' && plays(c.css));
   if (!change) return;
   if (running) { running.skipTransition(); running = null; }
+  const myId = ++transitionId;
   const id = ident(), { owner } = change;
   const release = holdRoutes(change.beneath, owner);
+  // Route projection can synchronously dispatch blur and reenter the runtime (including a tab cut).
+  if (transitionId !== myId || pending || Link.poisoned?.() || !stillTop(root, owner)) {
+    try { release(); } catch (err) { console.error(err); }
+    return;
+  }
+  let released = false, entered = false;
+  const undo = () => {
+    if (owner.style.viewTransitionName === id) owner.style.viewTransitionName = '';
+    if (!released) { released = true; try { release(); } catch (err) { console.error(err); } }
+  };
   style ??= document.head.appendChild(document.createElement('style'));
   style.textContent = `:root{view-transition-name:none}::view-transition-new(${id}){animation:${change.css}}`;
-  const ownPending = (pending = Object.assign([], { after: [] }));
-  const drainPending = () => {
-    if (pending !== ownPending) return;
-    const tails = pending;
-    pending = null;
-    try { for (const f of tails) f(); } finally { for (const f of tails) if (!f.ran) f.release(); for (const f of tails.after) f(); }
-  };
-  inflight.n++;
+  const d = defer([], inflight, f => f());
   let t;
+  d.onHandoff(() => {
+    if (running === t) running = null;
+    undo();
+    try { t?.skipTransition(); } catch {}
+  });
   try {
     t = document.startViewTransition(() => {
+      d.drain();
+      if (transitionId !== myId || Link.poisoned?.() || !stillTop(root, owner)) { undo(); return; }
       owner.style.viewTransitionName = id;
-      drainPending();
+      entered = true;
     });
   } catch {
-    inflight.n--;
-    release();
-    drainPending();
+    undo();
+    d.abort();
     return;
   }
   running = t;
   const clean = () => {
     if (running === t) running = null;
-    if (owner.style.viewTransitionName === id) owner.style.viewTransitionName = '';
-    release();
-    drainPending();
+    undo();
+    d.fallback();
   };
-  const ready = t.ready.then(() => { for (const f of after ?? []) f(); }, () => {}).finally(() => inflight.n--);
-  (globalThis.exact ??= {}).viewTransition = () => ready;
-  t.updateCallbackDone.then(null, drainPending);
+  d.settleReady(t, after);
+  t.updateCallbackDone.then(() => { if (!entered) t.skipTransition(); }, d.fallback);
   t.finished.then(clean, clean);
 }
 
-/** `startViewTransition()` (LLP 1013.003): the commit's tree update `run` inside a transition of the whole page, the
+/** `startViewTransition()` (LLP 1013.003): the commit's tree update `runs` inside a transition of the whole page, the
  * root's own cross-fade as the browser plays it; its pushes and pops play nothing of their own. */
-function crossFade(run, inflight, after) {
+function crossFade(runs, inflight, after, initialAfter = []) {
   if (running) { running.skipTransition(); running = null; }
+  ++transitionId;
   // the root takes part again: the other transitions here leave it unnamed
   if (style) style.textContent = '';
-  const ownPending = (pending = Object.assign([run], { after: [] }));
-  const drainPending = () => {
-    if (pending !== ownPending) return;
-    const tails = pending;
-    pending = null;
-    try { for (const f of tails) f(); } finally { for (const f of tails) if (!f.ran) f.release(); for (const f of tails.after) f(); }
-  };
-  inflight.n++;
+  const list = Array.isArray(runs) ? runs : [runs];
+  const d = defer(list, inflight, f => f(), true, initialAfter);
   let t;
   try {
     t = document.startViewTransition(() => {
-      drainPending();
+      d.drain();
     });
   } catch {
-    inflight.n--;
-    drainPending();
+    d.abort();
     return true;
   }
   running = t;
-  const ready = t.ready.then(() => { for (const f of after ?? []) f(); }, () => {}).finally(() => inflight.n--);
-  (globalThis.exact ??= {}).viewTransition = () => ready;
-  const drainFallback = () => { try { drainPending(); } catch (e) { console.error(e); } };
-  const clean = () => { if (running === t) running = null; drainFallback(); };
-  t.updateCallbackDone.then(null, drainFallback);
+  d.settleReady(t, after);
+  const clean = () => { if (running === t) running = null; d.fallback(); };
+  t.updateCallbackDone.then(null, d.fallback);
   t.finished.then(clean, clean);
   return true;
 }
@@ -224,7 +313,30 @@ export function commit(tail, queue, inflight, after, fade) {
     run.release = () => { Link.Invocation.pending.delete(call); held?.release(); tail.unrun?.(); };
     return run;
   };
-  if (pending) { pending.push(deferred()); return true; }
+  if (pending) {
+    if (fade && !pending.isFade) {
+      // Promote an unrun non-fade transition (whose `:root` was excluded from its old snapshot)
+      // into a whole-page cross-fade carrying every waiting tail and afterCommit hook.
+      // Hold `pending` as a temporary fade queue across `handoff()` so ANY reentrant commit
+      // triggered by route-hold release (cut, shared, or fade) queues in FIFO order instead
+      // of flushing DOM writes prematurely or overwriting `pending`.
+      const next = deferred();
+      const staging = [];
+      staging.after = [];
+      staging.isFade = true;
+      const oldPending = pending;
+      const oldTails = oldPending.splice(0);
+      const oldAfter = oldPending.after.splice(0);
+      pending = staging;
+      oldPending.handoff?.();
+      const reentered = staging.splice(0);
+      const reenteredAfter = staging.after.splice(0);
+      pending = null;
+      return crossFade([...oldTails, next, ...reentered], inflight, after, [...oldAfter, ...reenteredAfter]);
+    }
+    pending.push(deferred());
+    return true;
+  }
   // Under reduce motion every change cuts (LLP 1013.000 D7, LLP 1013.001 D6).
   if (typeof document.startViewTransition !== 'function' || matchMedia('(prefers-reduced-motion: reduce)').matches) return tail();
   if (fade) return crossFade(deferred(), inflight, after);
@@ -239,12 +351,13 @@ export function commit(tail, queue, inflight, after, fade) {
   }
   if (!old.size && !exits.size) {
     const result = tail();
-    if (root) entrance(routes, root, inflight, after);
+    if (root && !pending) entrance(routes, root, inflight, after);
     return result;
   }
   const before = new Set(document.querySelectorAll(NAME)); // an arriver is new
   // A second change ends the first at its end state (LLP 1013.001 D6).
   if (running) { running.skipTransition(); running = null; }
+  const myId = ++transitionId;
   // Every candidate is captured under its own name; which ones left, and
   // whether a name left once and arrived once, is known after the flush.
   const ids = new Map(), curves = new Map(); // element → ident, its curve
@@ -261,21 +374,28 @@ export function commit(tail, queue, inflight, after, fade) {
   // Only the pairs move: the root and unpaired leavers are not shown.
   style ??= document.head.appendChild(document.createElement('style'));
   style.textContent = ':root{view-transition-name:none}';
-  const ownPending = (pending = Object.assign([deferred()], { after: [] }));
-  const drainPending = () => {
-    if (pending !== ownPending) return;
-    const tails = pending;
-    pending = null;
-    // A tail that throws skips the rest; their presses are let go all the same (focus.js).
-    try { result = tails.map(f => f())[0]; } finally { for (const f of tails) if (!f.ran) f.release(); for (const f of tails.after) f(); }
-  };
-  inflight.n++;
   let paired = false, routed = false, result = true;
+  const d = defer([deferred()], inflight, (f, i) => {
+    const r = f();
+    if (i === 0) result = r;
+  });
   const rules = [], named = [...old.keys(), ...exits.keys()], releases = [];
+  const undoNames = () => {
+    for (const el of named) if (own.has(el.style.viewTransitionName)) el.style.viewTransitionName = '';
+    for (const release of releases.splice(0)) { try { release(); } catch (err) { console.error(err); } }
+  };
   let t;
+  d.onHandoff(() => {
+    if (running === t) running = null;
+    undoNames();
+    try { t?.skipTransition(); } catch {}
+  });
   try {
     t = document.startViewTransition(() => {
-    drainPending();
+    d.drain();
+    // A tail (or queued fade handoff) may have started a newer transition or poisoned
+    // the runner while draining; do not overwrite its stylesheet, names, or route holds.
+    if (transitionId !== myId || Link.poisoned?.()) { undoNames(); return; }
     // A leaver is gone, or kept only as an exit ghost (its own or an
     // ancestor's): it has left. One that stayed keeps its name and moves.
     const gone = new Map(); // name → the leavers that left
@@ -286,19 +406,22 @@ export function commit(tail, queue, inflight, after, fade) {
       if (el.isConnected && !ghost && el.getAttribute('data-shared-element') === name) { rules.push(`::view-transition-group(${ids.get(el)}),::view-transition-old(${ids.get(el)}),::view-transition-new(${ids.get(el)}){animation:none}`); continue; }
       gone.set(name, [...(gone.get(name) ?? []), [el, ghost]]);
     }
+    const applyPairs = [];
     for (const [name, left] of gone) {
       const arrivers = [...document.querySelectorAll(`[data-shared-element="${CSS.escape(name)}"]`)].filter(e => !before.has(e));
       const to = left.length === 1 && arrivers.length === 1 ? arrivers[0] : null;
       const [el, ghost] = left[0];
       const c = to && (curve(to) ?? curves.get(el));
       if (!c) { for (const [e] of left) rules.push(`::view-transition-group(${ids.get(e)}){display:none}`); continue; }
-      // The transition is its exit (D7): a ghost of its own goes; inside an
-      // ancestor's, it is hidden and the rest leaves as it would.
-      if (ghost === el) el.remove(); else if (ghost) el.style.visibility = 'hidden';
+      // Defer ghost removal and scrollIntoView until route validation (`holdRoutes`) succeeds
+      // so a reentrant tab cut leaves no irreversible DOM changes on a skipped transition.
       const id = ids.get(el);
-      to.style.viewTransitionName = id;
-      named.push(to);
-      to.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      applyPairs.push(() => {
+        if (ghost === el) el.remove(); else if (ghost) el.style.visibility = 'hidden';
+        to.style.viewTransitionName = id;
+        named.push(to);
+        to.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      });
       rules.push(`::view-transition-group(${id}),::view-transition-old(${id}),::view-transition-new(${id}){animation-duration:${c.duration}ms;animation-delay:${c.delay}ms;animation-timing-function:${c.timing}}`);
       paired = true;
     }
@@ -311,38 +434,37 @@ export function commit(tail, queue, inflight, after, fade) {
       if (popped && plays(popped.css)) { rules.push(`::view-transition-old(${id}){animation:${popped.css}}`); routed = true; }
       else rules.push(`::view-transition-group(${id}){display:none}`);
     }
-    for (const c of changes.filter(c => c.which === 'new' && plays(c.css))) {
+    for (const c of changes.filter(c => c.which === 'new' && plays(c.css) && stillTop(root, c.owner))) {
       const id = ident();
       c.owner.style.viewTransitionName = id;
       named.push(c.owner);
       own.add(id);
       releases.push(holdRoutes(c.beneath, c.owner));
+      // Route projection can synchronously dispatch blur and switch tabs or start a newer transition.
+      if (transitionId !== myId || Link.poisoned?.() || !stillTop(root, c.owner)) { paired = routed = false; undoNames(); return; }
       rules.push(`::view-transition-new(${id}){animation:${c.css}}`);
       routed = true;
     }
+    if (transitionId !== myId || Link.poisoned?.()) { paired = routed = false; undoNames(); return; }
+    for (const applyPair of applyPairs) applyPair();
     style.textContent = `:root{view-transition-name:none}${rules.join('')}`;
     });
   } catch {
-    inflight.n--;
-    for (const el of named) if (own.has(el.style.viewTransitionName)) el.style.viewTransitionName = '';
-    for (const release of releases) release();
-    drainPending();
+    undoNames();
+    d.abort();
     return result;
   }
   running = t;
-  const drainFallback = () => { try { drainPending(); } catch (e) { console.error(e); } };
   const clean = () => {
     if (running === t) running = null;
-    for (const el of named) if (own.has(el.style.viewTransitionName)) el.style.viewTransitionName = '';
-    for (const release of releases) release();
-    drainFallback();
+    undoNames();
+    d.fallback();
   };
-  t.updateCallbackDone.then(() => { if (!paired && !routed) t.skipTransition(); }, drainFallback);
+  t.updateCallbackDone.then(() => { if (!paired && !routed) t.skipTransition(); }, d.fallback);
   // Its animations exist once it is ready: what runs after a commit's tree
   // (the agent's clock registers and seeks them) runs again then. The agent
   // waits for that before it moves the clock (agent.js).
-  const ready = t.ready.then(() => { for (const f of after ?? []) f(); }, () => {}).finally(() => inflight.n--);
-  (globalThis.exact ??= {}).viewTransition = () => ready;
+  d.settleReady(t, after);
   t.finished.then(clean, clean);
   return result;
 }

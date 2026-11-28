@@ -7,7 +7,7 @@ import { Refusal } from './shape.js';
 import { regions } from './regions.js';
 import { declare } from './declarations.js';
 import { backdropValue as backdropCss } from './backdrop.js';
-import { onEnd, effect, untracked, say, inflight, After, Paint, Probes, Media, Links, Scrolls, Selects } from './rt.js';
+import { onEnd, onMount, effect, untracked, say, inflight, After, Paint, Probes, Media, Links, Scrolls, Selects } from './rt.js';
 import { Adopt, adopting, PrepareTasks } from './mount.js';
 import { autofocusProp } from './focus.js';
 const SVG = 'http://www.w3.org/2000/svg';
@@ -40,7 +40,7 @@ export function h(p, tag, cls, attrs, text, ns) {
         if (k === 'data-exact-f' || k.startsWith('data-exact-f-')) bits |= Number(attrs[k]);
       }
     if (tag === 'a') Links?.made(e, attrs);
-    if ('data-scrolldocument' in attrs) Docs.add(e);
+    if ('data-scrolldocument' in attrs) onMount(() => Docs.add(e));
     if (tag === 'img') Hooks.image?.(e);
   }
   if (Paint) e.$paintFacts = bits;
@@ -117,7 +117,7 @@ function adopt(p, tag, cls, attrs) {
       else if (e.getAttribute(k) !== String(v)) e.setAttribute(k, v);
     }
     if (tag === 'a') Links?.made(e, attrs, rendered);
-    if ('data-scrolldocument' in attrs) Docs.add(e);
+    if ('data-scrolldocument' in attrs) onMount(() => Docs.add(e));
     if (tag === 'img') Hooks.image?.(e);
   }
   Paint?.list(e);
@@ -220,7 +220,7 @@ const navigable = v => {
 export function P(e, name, f) {
   if (PrepareTasks && ['navigationKey', 'navigationBack', 'aria-selected', 'aria-controls', 'id'].includes(name))
     (e.$taskProps ??= {})[name] = f;
-  if (name === 'data-scrolldocument') Docs.add(e);
+  if (name === 'data-scrolldocument') onMount(() => Docs.add(e));
   effect(() => {
     let v = f();
     v = rel(name, v == null ? null : typeof v === 'boolean' ? String(v) : String(v));
@@ -230,6 +230,10 @@ export function P(e, name, f) {
     if (name === 'href' && v != null && (!navigable(v) || v === '')) v = null;
     // no material, cleared as the runner clears it (bridge.rs `prop_value`)
     if (name === 'backgroundMaterial' && v === 'none') v = null;
+    if (name === 'src' && e.localName === 'img' && e.$authoredSrc !== v) {
+      e.$authoredSrc = v;
+      e.$srcGen = (e.$srcGen ?? 0) + 1;
+    }
     if (PropHooks[name]?.(e, v)) return;
     if (NOT_DOM.test(name)) return void (e['$' + name] = v);
     // media.js: `paused`, `volume`, `currentTime` … are the glue's; an `app:/` source its own
@@ -240,7 +244,7 @@ export function P(e, name, f) {
       if (!e.childElementCount && e.textContent !== (v ?? '')) e.textContent = v ?? '';
     } else if (name === 'value') {
       if (e.localName === 'select') {
-        Selects.add(e);
+        onMount(() => Selects.add(e), (e.$selectMountKey ??= {}));
         e.$value = v ?? '';
         e.$set = true;
       }
@@ -250,8 +254,12 @@ export function P(e, name, f) {
       e.exactDecorations?.sync();
     } else if (name === 'scrollTop' || name === 'scrollLeft') {
       // Kept as `$scrollTop`, `$scrollLeft`: where the scroller opens when its page arrives (fragment.js, LLP 1153 D5.1).
-      e['$' + name] = v == null ? undefined : Number(v);
-      if (v != null) (Scrolls.get(e) ?? Scrolls.set(e, {}).get(e))[name] = Number(v);
+      const at = v == null ? undefined : Number(v);
+      e['$' + name] = at;
+      if (at != null)
+        onMount(() => {
+          if (e['$' + name] === at) (Scrolls.get(e) ?? Scrolls.set(e, {}).get(e))[name] = at;
+        }, (e['$scrollMountKey' + name] ??= {}));
     } else if (BOOL.test(name)) {
       if (name === 'inert') e.authoredInert = v === 'true';
       if (name === 'autofocus') autofocusProp(e, v === 'true');

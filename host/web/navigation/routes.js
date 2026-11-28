@@ -66,19 +66,16 @@ export const liveById = (id, root = document) => {
 const shownRoutes = new WeakMap();
 // @ref LLP 1013.001 D2, D6 — while a route transition plays (shared.js), the route beneath a pushed route stays shown
 // and the pushed route inert; the projection keeps both so until the transition ends.
-const heldRoutes = new Set(), arrivingRoutes = new Set();
+const heldRoutes = new Map(), arrivingRoutes = new Map();
+const bump = (m, k, d) => { const n = (m.get(k) ?? 0) + d; n > 0 ? m.set(k, n) : m.delete(k); };
 /** Each navigation root under `root` with the routes it last showed in its selected stack, bottom first. */
 export const shownStacks = (root) => new Map([...root.querySelectorAll("[navigationBack]")].map((nav) => [nav, shownRoutes.get(nav) ?? []]));
 /** Hold `beneath` shown and `arriving` inert, projected now; what it returns lets them go and projects again. */
 export function holdRoutes(beneath, arriving) {
-  heldRoutes.add(beneath);
-  arrivingRoutes.add(arriving);
-  navigation.project(root, log);
-  return () => {
-    heldRoutes.delete(beneath);
-    arrivingRoutes.delete(arriving);
-    navigation.project(root, log);
-  };
+  bump(heldRoutes, beneath, 1); bump(arrivingRoutes, arriving, 1);
+  try { navigation.project(root, log); } catch (e) { bump(heldRoutes, beneath, -1); bump(arrivingRoutes, arriving, -1); throw e; }
+  let done = false;
+  return () => { if (done) return; done = true; bump(heldRoutes, beneath, -1); bump(arrivingRoutes, arriving, -1); navigation.project(root, log); };
 }
 export const sheetLeaves = (el) => SHEETS && slideAway(el);
 // @ref LLP 1115.000 D4.8 — a sheet the look draws (fixed to the window) slides back down as it closes, as it slid up (neutral.css), unless the person asks for less motion. A runtime asks this before it removes a modal route (glue.js's `destroy`; rt.js's `clear`, `each` and presence's `Leave`); a sheet that leaves stays whole until it is off the window, from where it stands, out of input, accessibility and the routes as presence-glue.js's leaving views are (LLP 1063), the focus leaving it as a removed one's would (input-glue.js's `arrive` takes one a blur does not reach). One holding media or a field whose decorations the browser paints closes at once, as its runtime empties those with the commit, and so does one holding an open dialog or popover, which the top layer would leave frozen on the window; a native view slides, showing what its module left in it. It keeps its ids for what it draws, though a command by id passes over it (`liveById`), and its stack's projection ends it on showing a sheet that was not beneath it, which may share them (compared as elements: a replace keeps its key).

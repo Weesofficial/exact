@@ -17,7 +17,7 @@ import {
   liveById,
   isInputClick,
 } from './navigation.js';
-import { Owner, onEnd, Origin, Media, inflight, Sounds, Flushing, FocusQueue, commit, Writes, Finishes, deferForReplacement } from './rt.js';
+import { Owner, onEnd, onMount, Origin, Media, inflight, Sounds, Flushing, FocusQueue, commit, Writes, Finishes, deferForReplacement } from './rt.js';
 import { clock, advance } from './clock.js';
 import { Mutations } from './resources.js';
 import { start } from './mount.js';
@@ -95,7 +95,7 @@ export function on(e, kind, f, bind) {
 // Each event family's binder, passed to `on` by the generated module only where its plan binds that family
 // (emit.rs `binder`), so a plan carries only the families it hears; any other event is a plain listener.
 // An image's `load` and `error` (elements.js `imageEvent`); another element's are plain listeners.
-export const onImage = (e, kind, f, l) => (e.localName === 'img' ? imageEvent(e, kind, f, inflight) : l(kind, () => f()));
+export const onImage = (e, kind, f, l) => (e.localName === 'img' ? imageEvent(e, kind, f, inflight, onMount, onEnd) : l(kind, () => f()));
 // A link with a press is the app's navigation: the browser's is prevented. A modified or other-button click, a `target`
 // or `download`, is the browser's alone and the press does not run, with a router or without (`router`, input-glue.js).
 // a press action taking one more parameter hears the MouseEvent's modifiers (gallery F20) and point (LLP 1021 D2)

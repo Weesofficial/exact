@@ -9,14 +9,23 @@ import { symbolSize, symbolPlaceholder, symbolMask, syncSymbolPlaceholder, symbo
 // loaded once (`symbol-roles.js`, the build's). Imported by an app's module
 // only when its plan draws a symbol or a tinted raster, binds an image's
 // source, or names an `app:/` file (below).
-import { After, PropHooks, Hooks, inflight, journal, clock, data, onEnd } from "./rt.js";
+import { After, PropHooks, Hooks, inflight, journal, clock, data, onEnd, onMount } from "./rt.js";
 import { loadOnce } from '../web/load-once.js';
 
 const loads = {};
 // The commit pass visits symbols, app:/ images and tinted rasters until their
 // scope ends, in place of document-wide queries (LLP 1071.001 A7).
 const Images = new Set();
-const image = e => { if (!Images.has(e)) { Images.add(e); onEnd(() => Images.delete(e)); } };
+const image = e => {
+  if (!Images.has(e)) {
+    Images.add(e);
+    onEnd(() => {
+      Images.delete(e);
+      e.$app = null;
+      e.$appSeq = (e.$appSeq ?? 0) + 1;
+    });
+  }
+};
 Hooks.image = e => {
   const s = e.getAttribute("data-symbol-source");
   if (s?.startsWith("symbol:icon|")) draw(e, s.slice(7));
@@ -81,7 +90,7 @@ function everyRole() {
   inflight.n++;
   loadOnce(loads, "All", () => import("./symbol-roles.js").then(m => {
     Table = { ...m.default, ...Table };
-    for (const e of document.querySelectorAll("#exact-root img[data-symbol-source]")) draw(e, e.getAttribute("data-symbol-source").slice(7));
+    for (const e of Images) if (e.hasAttribute("data-symbol-source")) draw(e, e.getAttribute("data-symbol-source").slice(7));
     rolesReady = true;
     refresh();
   }), error => journal.push(`t=${clock.now} symbol roles: unavailable: ${error.message}`)).finally(() => inflight.n--);
@@ -99,18 +108,18 @@ export function symbols(table) {
   // A hook before this one (pictures.js: a package's scheme) takes its sources first.
   const prior = PropHooks.src;
   PropHooks.src = (e, v) => {
-    if (prior?.(e, v)) return true;
-    // A source that is no longer a symbol drops the symbol's rendering first,
-    // so neither `refresh` nor the role table's late load paints it back over
-    // what the new source shows (an `app:/` file lands asynchronously).
+    // Drop any previous symbol or app:/ rendering before delegating (including to
+    // pictures.js) so a late app-file reply or old symbol mask cannot paint over it.
     if (!v?.startsWith("symbol:")) unsymbol(e);
+    if (e.localName === "img" && e.$app && !v?.startsWith("app:/")) { e.$app = null; e.$appSeq = (e.$appSeq ?? 0) + 1; e.removeAttribute("data-app-src"); }
+    if (prior?.(e, v)) { template(e, null); return true; }
     if (e.localName === "img" && v?.startsWith("app:/")) { appSource(e, v); return true; }
-    if (e.localName === "img" && e.$app) { e.$app = null; e.removeAttribute("data-app-src"); }
     // A `data:` source past its bound shows nothing, as on every host (LLP 1011 §2; exact_raster::MAX_DATA_URL_BYTES).
     if (e.localName === "img" && v?.startsWith("data:") && v.length > DATA_LIMIT) { journal.push(`t=${clock.now} image refused: a data: source is over ${DATA_LIMIT} bytes`); e.removeAttribute("src"); return true; }
     if (e.localName !== "img" || !v?.startsWith("symbol:")) { template(e, v); return false; }
     template(e, null);
     if (!Object.hasOwn(Table, v.slice(7)) && !loads.All && !v.startsWith("symbol:icon|")) everyRole();
+    e.$unsymbol = () => unsymbol(e);
     e.setAttribute("data-symbol-source", v); draw(e, v.slice(7));
     // Decorative unless its author named it (`alt`, `aria-label`), as the template writes it.
     if (!e.getAttribute("alt")) e.alt = "";
@@ -148,13 +157,25 @@ function unsymbol(e) {
 
 const DATA_LIMIT = 1024 * 1024;
 function appSource(e, v) {
-  image(e); e.$app = v;
+  image(e);
+  const changed = e.$app !== v;
+  e.$app = v;
+  const seq = (e.$appSeq = (e.$appSeq ?? 0) + 1);
   if (e.getAttribute("data-app-src") !== v) e.setAttribute("data-app-src", v);
-  inflight.n++;
-  (loadOnce(loads, "Files", () => import(new URL("./picker-glue.js", import.meta.url).href).then(() => globalThis.exact.appURL)))
-    .then(appURL => appURL(v, data.appId))
-    .then(url => { if (e.$app === v && e.getAttribute("src") !== url) { if (url) e.setAttribute("src", url); else e.removeAttribute("src"); template(e, url || null); } })
-    .catch(() => {}).finally(() => inflight.n--);
+  if (changed) {
+    e.removeAttribute("src");
+    template(e, null);
+    e.$settled = null;
+    e.$why = null;
+  }
+  onMount(() => {
+    if (e.$appSeq !== seq || e.$app !== v) return;
+    inflight.n++;
+    (loadOnce(loads, "Files", () => import(new URL("./picker-glue.js", import.meta.url).href).then(() => globalThis.exact.appURL)))
+      .then(appURL => appURL(v, data.appId))
+      .then(url => { if (e.$appSeq === seq && e.$app === v && e.getAttribute("src") !== url) { if (url) e.setAttribute("src", url); else e.removeAttribute("src"); template(e, url || null); } })
+      .catch(() => {}).finally(() => inflight.n--);
+  }, (e.$appMountKey ??= {}));
 }
 // A raster with a `-exact-tint-color` is a template (element.rs `host_css`, LLP
 // 1011 §3): its alpha masks the tint. A source that becomes a raster takes
@@ -188,6 +209,7 @@ function template(e, v) {
   e.style.setProperty("--exact-tint-offset", "-100000px 0");
   e.style.setProperty("object-position", "var(--exact-tint-offset,var(--exact-object-position,50% 50%))");
   e.$template = true;
+  e.$untemplate = () => template(e, null);
   if (!globalThis.__exactRender) tintFit(e);
 }
 function refresh() {
@@ -196,6 +218,10 @@ function refresh() {
   for (const el of Images) {
     if (!el.isConnected) continue;
     if (el.$app === undefined && el.hasAttribute("data-app-src")) appSource(el, el.getAttribute("data-app-src"));
+    if (el.hasAttribute("data-symbol-source") && !el.getAttribute("data-symbol-path") && !el.hasAttribute("data-symbol-file")) {
+      const role = el.getAttribute("data-symbol-source").slice(7);
+      if (Object.hasOwn(Table, role)) draw(el, role);
+    }
     if (el.hasAttribute("data-symbol-path")) symbols.push(el);
     else if (el.$template) rasters.push(el);
   }
