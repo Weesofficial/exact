@@ -618,6 +618,8 @@ extension NavigationHost {
         let shows = c.map { routeShowsBar($0, in: $0.navigationController ?? nav) } ?? barShows(nav)
         guard nav.isNavigationBarHidden == shows else { return }
         nav.setNavigationBarHidden(!shows, animated: animated)
+        // A zoom's cancelled pop leaves the bar it hid at alpha 0, shown again but invisible.
+        if shows, nav.transitionCoordinator?.isCancelled == true { nav.navigationBar.alpha = 1 }
         // A bar that comes back for a large title (a route with no bar turned
         // into a sign-in form) opens it over a scroller at its start, as a
         // first screen's opens; left to UIKit, it came back inline.

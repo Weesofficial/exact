@@ -1289,6 +1289,9 @@ final class NavigationHost: NSObject, UINavigationControllerDelegate, UIGestureR
             guard let self, let navigationController else { return }
             transitionEnded(navigationController, swipe: swipe, cancelled: context.isCancelled)
         }
+        #if os(iOS)
+        crossFlights(transition, to: viewController, in: navigationController)
+        #endif
         // That paints what shows as it starts. A swipe reveals the route a
         // strip at a time, and painting stopped there until the swipe ended
         // (a back swipe showed the list's top half, then its bottom half).

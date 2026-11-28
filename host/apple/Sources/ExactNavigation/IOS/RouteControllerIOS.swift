@@ -507,6 +507,15 @@ final class RouteController: UIViewController, UIScrollViewDelegate {
         (viewIfLoaded as? PresentationMount)?.didLeaveWindow = nil
         retiringRoot.removeFromSuperview()
     }
+    /// The pixels `freeze` laid over the route.
+    weak var frozen: UIView?
+    #if os(iOS)
+    /// The `navigationSource` it zooms by, whose element the zoom carries.
+    var zoomSource: String? {
+        guard #available(iOS 18.0, *), preferredTransition != nil else { return nil }
+        return node.props["navigationSource"]
+    }
+    #endif
     /// The exit it declares, kept while it is its stack's top: it has left
     /// the tree when UIKit asks for its pop's animator (RouteTransitionIOS).
     var exitPart: RoutePart?

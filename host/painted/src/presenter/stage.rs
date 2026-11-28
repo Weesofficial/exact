@@ -48,6 +48,7 @@ use tiny_skia::Transform;
 
 mod authored;
 mod detents;
+mod flights;
 #[cfg(test)]
 pub(super) mod tests;
 mod touch;
@@ -236,6 +237,8 @@ struct Shift {
     /// Only that route is drawn: the other is a sheet's, drawn as the sheet.
     alone: bool,
     container: Option<zoom::Container>,
+    /// A container's names and where they start, on its clock (LLP 1013.004 D4).
+    names: Option<(Vec<(NodeKey, NodeKey)>, f32)>,
     /// A switch between stacks uses Material's fade through.
     through: bool,
     /// The leaving route's ancestors when the switch began: what of them
@@ -331,6 +334,8 @@ pub(super) struct State {
     /// The routes given a block of the stage's.
     blocks: Vec<ViewId>,
     zooms: Vec<zoom::Source>,
+    /// The pairs a pop of the top route flies, with the epoch and top route of `remember_pops`.
+    pops: (u64, Option<NodeKey>, Vec<(NodeKey, NodeKey)>),
 }
 
 /// What a sheet's heights are computed from: its `navigationDetent`, the
@@ -429,6 +434,7 @@ impl<D: DataSource> Presenter<D> {
         self.stage.seen = keys.clone();
         let top_was = self.stage.top.take();
         self.sync_shift(&before, &stack, &keys, &kinds, top_was, now);
+        self.remember_pops(&keys, &kinds);
         self.sync_sources();
         self.stage.top = self.top_of(&stack, &kinds);
         // Sheets that went slide out from where they were.
@@ -463,9 +469,7 @@ impl<D: DataSource> Presenter<D> {
                 self.stage.gesture = None;
             }
         }
-        self.stage
-            .preview
-            .take_if(|p| !p.live(&keys) || p.returned(now));
+        self.settle_preview(&keys, now);
         let tallest = (h - status).max(1.0);
         // What of the page the keyboard covers, where it did not end the
         // page above it (`interactive-widget: overlays-content`).
@@ -607,13 +611,7 @@ impl<D: DataSource> Presenter<D> {
             }
         }
         self.stage.closing.retain(|c| c.top.moving(now));
-        if self.motion_off() {
-            self.stage.shift = None;
-            self.stage.preview = None;
-        }
-        if (self.stage.shift.as_ref()).is_some_and(|s| !s.progress.moving(now)) {
-            self.stage.shift = None;
-        }
+        self.settle_shift(now);
         self.update_hosted_back();
         self.hold_arriving();
         self.place_sheets(&stack, &kinds);
@@ -722,6 +720,7 @@ impl<D: DataSource> Presenter<D> {
         // A second route change ends the first transition (LLP 1013.001 D6):
         // whatever this one chooses, a cut included, starts from rest.
         self.stage.shift = None;
+        self.host.end_route_flights_outside(*new);
         let left = (top_was.as_ref().filter(|t| t.key == *old))
             .map_or_else(Vec::new, |t| t.ancestors.clone());
         let pushed = now_keys.len() > before.len() && now_keys.starts_with(before);
@@ -790,7 +789,8 @@ impl<D: DataSource> Presenter<D> {
             Some(_) => (self.sheet_span().1, self.viewport.1),
             None => self.viewport,
         };
-        let from = (self.stage.preview.take()).and_then(|p| p.pose_for(*old, size));
+        let preview = self.stage.preview.take();
+        let from = preview.and_then(|p| p.pose_for(*old, size));
         if still {
             return;
         }
@@ -832,9 +832,11 @@ impl<D: DataSource> Presenter<D> {
             authored: None,
             alone: false,
             container,
+            names: None,
             through,
             left,
         });
+        self.fly_shift(forward, (*old, *new), (through, container), preview);
     }
 
     /// Whether anything on the stage moves on its own: frames are owed.
@@ -1064,11 +1066,13 @@ impl<D: DataSource> Presenter<D> {
         if let Some((outgoing, incoming)) = page_pair {
             let (out_pose, in_pose) = self.shift_poses(now, None);
             let forward = page_shift.is_some_and(|s| s.forward);
-            // A crossing kept the leaving route's bar; under a preview the
-            // bar is still the leaving route's, and the one beneath has none.
+            // A crossing kept the leaving route's bar; under a preview the bar is still the leaving
+            // route's, and the one beneath shows the bar it kept where the leaving route has none.
+            let kept =
+                (self.stage.bar.clone()).and_then(|(r, t, f)| (r == incoming).then_some((t, f)));
             let (out_bar, in_bar) = match page_shift {
                 Some(s) => (s.bar.clone(), bar_top.clone()),
-                None => (bar_top.clone(), None),
+                None => (bar_top.clone(), kept),
             };
             let order = match forward {
                 true => [(outgoing, out_pose, out_bar), (incoming, in_pose, in_bar)],
@@ -1117,6 +1121,7 @@ impl<D: DataSource> Presenter<D> {
     ) {
         let kernel = self.host.kernel();
         let live = kernel.node_by_key(key);
+        let lift = self.container_lift(key);
         let Some(at) = place else {
             let through = self.stage.shift.as_ref().filter(|s| s.through);
             let key = match &live {
@@ -1140,6 +1145,7 @@ impl<D: DataSource> Presenter<D> {
                 radius: pose.radius,
                 height: pose.height,
                 bar: bar.map(|(tape, frame)| (tape, self.window_to_page(frame))),
+                lift,
             });
             return;
         };
@@ -1382,7 +1388,7 @@ impl<D: DataSource> Presenter<D> {
                 shift.progress.linear(now),
             );
             if let Some(container) = shift.container {
-                let pose = container.pose(shift.forward, t, linear, shift.from);
+                let pose = container.pose(shift.forward, t, shift.from);
                 return match shift.forward {
                     true => (Pose::REST, pose),
                     false => (pose, Pose::REST),
@@ -1440,7 +1446,7 @@ impl<D: DataSource> Presenter<D> {
         }
         match &self.stage.preview {
             Some(p) => match self.previewed_exit(p) {
-                Some(exit) => (exit.pose(f64::from(p.shown(now)) * exit.ms()), Pose::REST),
+                Some(exit) => (exit.pose(self.play_ms(p.shown(now), exit.ms())), Pose::REST),
                 None => (p.page_pose(now, width, self.viewport.1), Pose::REST),
             },
             None => (Pose::REST, Pose::REST),
