@@ -198,7 +198,7 @@ final class RouteController: UIViewController, UIScrollViewDelegate {
     /// A safe-area change that came while UIKit presented the route, taken in its next layout (`viewDidLayoutSubviews`).
     private(set) var safeAreaOwed = false
     /// Whether UIKit is presenting the route's controller or a container holding it.
-    private var inPresentation: Bool {
+    var inPresentation: Bool {
         sequence(first: self as UIViewController, next: \.parent).contains { $0.isBeingPresented }
     }
     private func takeSafeArea() {
