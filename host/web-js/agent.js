@@ -634,10 +634,10 @@ export function install(exact, { passive = false } = {}) {
       }
       // @ref LLP 1080.002 D4 — the ids `tree` gives, where CDP's DOM snapshot reads them, and the document's nonce.
       case 'axStamp': {
-        all(); for (const [i, el] of views) if (el.isConnected && el.getAttribute('data-agent-view') !== String(i)) el.setAttribute('data-agent-view', i);
+        all(); for (const [i, el] of views) if (el.nodeType === 1 && el.isConnected && el.getAttribute('data-agent-view') !== String(i)) el.setAttribute('data-agent-view', i);
         // A hatch's parts, stamped on their bound elements: `tree --ax` joins a part by ownership (LLP 1075.003.000.001 §3.5).
         const parts = [], bound = new Set();
-        if (exact.hatchRegions) for (const [i, el] of views) for (const p of exact.hatchRegions.of(el)?.parts ?? []) {
+        if (exact.hatchRegions) for (const [i, el] of views) if (el.nodeType === 1) for (const p of exact.hatchRegions.of(el)?.parts ?? []) {
           const at = exact.hatchRegions.part(el, p.id), name = `${i}/${p.id}`;
           if (!at) continue;
           if (at.getAttribute('data-agent-part') !== name) at.setAttribute('data-agent-part', name);

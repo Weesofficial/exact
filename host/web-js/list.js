@@ -11,7 +11,7 @@
 import { scrollPadding } from "./navigation.js";
 import { inactive } from "./document.js";
 import { rt as runtime } from './rt-link.js';
-import { sig, effect, scope, end, untracked, write, writeItem, owner, onEnd, viewId, Views, inflight, Before, After, rev, ticket, journal, Resources, Mutations, unadopted, adopting, adoptRow, settled, Refusal, Hosts, exitView, clock, eq, presentRows } from "./rt.js";
+import { sig, effect, scope, end, untracked, write, writeItem, owner, onEnd, viewId, reserveViewId, Views, inflight, Before, After, rev, ticket, journal, Resources, Mutations, unadopted, adopting, adoptRow, settled, Refusal, Hosts, exitView, clock, eq, presentRows } from "./rt.js";
 import { loadOnce } from '../web/load-once.js';
 
 const loads = {};
@@ -343,7 +343,7 @@ class Collection {
       }
     }
   }
-  fixedSide(view) { return this.fixed ? [viewId(this.fixed.a), viewId(this.fixed.b)].indexOf(view) : -1; }
+  fixedSide(view) { return this.fixed ? this.fixed.views.indexOf(view) : -1; }
   fixedItems() {
     const groups = [[], []]; let side = 0;
     for (const el of this.el.childNodes) {
@@ -351,7 +351,7 @@ class Collection {
       if (el === this.fixed.b) { side = 1; continue; }
       if (side >= 0 && el.nodeType === 1) groups[side].push(viewId(el));
     }
-    return [this.fixed.a, this.fixed.b].map((el, side) => ({ view: viewId(el), roots: groups[side], size: this.index.fixed[side], epoch: 1, hidden: side === 1 && !!this.fixed.hidden }));
+    return this.fixed.views.map((view, side) => ({ view, roots: groups[side], size: this.index.fixed[side], epoch: 1, hidden: side === 1 && !!this.fixed.hidden }));
   }
   snapshot() {
     const g = this.geometry;
@@ -1191,7 +1191,7 @@ export function vl(el, subject, key, row, o) {
       while (at && (at.hasAttribute?.('data-listitemkey') || at.hasAttribute?.('data-exact-list-spacer'))) at = at.nextSibling;
       el.insertBefore(b, at); el.$n = at;
     } else el.append(a, b);
-    o.fixed[1](el); c.fixed = { a, b };
+    o.fixed[1](el); c.fixed = { a, b, views: [reserveViewId(), reserveViewId()] };
   }
   el.$n = null;
   el.$jump = (name, at) => { if (el[name] !== at) (jumps ??= []).push([c.view, at, name]); };

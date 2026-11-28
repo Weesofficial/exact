@@ -291,6 +291,9 @@ export function md(e, f, prepared) {
 export const Views = new Map();
 export const Ids = new WeakMap();
 let NextView = 1;
+/** Allocate a unique positive view id without registering a DOM node in `Views`
+ * (for virtualized-list fixed-content measurement slots, matching `runner/`). */
+export const reserveViewId = () => NextView++;
 const forgetView = e => {
   const i = Ids.get(e);
   if (!e.isConnected && Views.get(i) === e) Views.delete(i);
@@ -299,7 +302,7 @@ let ViewObserver = null;
 export function viewId(e) {
   let i = Ids.get(e);
   if (!i) {
-    i = NextView++;
+    i = reserveViewId();
     Ids.set(e, i);
   }
   if (!Views.has(i)) onEnd(() => queueMicrotask(() => forgetView(e)));

@@ -641,9 +641,9 @@ function agentReply(request) {
       case "reveal": return tagged(host.reveal(views.get(request.id), request.id, inertAncestor));
       // before a tap or a type (agent-input.js)
       case "axStamp":
-        // @ref LLP 1080.002 D4 — each live view's id where CDP's DOM snapshot reads it, and the document's nonce
+        // @ref LLP 1080.002 D4 — each live element view's id where CDP's DOM snapshot reads it, and the document's nonce
         for (const [id, el] of views) {
-          if (el.isConnected && el.getAttribute("data-agent-view") !== String(id)) {
+          if (el.nodeType === 1 && el.isConnected && el.getAttribute("data-agent-view") !== String(id)) {
             el.setAttribute("data-agent-view", id);
           }
         }

@@ -2,6 +2,8 @@
 import { beforeAll, afterAll, test as bunTest, expect } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { cdpBrowser, chromium, DESKTOP_INPUT } from '../../scripts/agent-launch.mjs';
+import { webAx } from '../../scripts/agent-ax.mjs';
+import { glueDeclarations } from '../web/tests/glue-fixture.mjs';
 import { need } from '../../scripts/coverage.mjs';
 
 const { unavailable } = chromium();
@@ -13,7 +15,7 @@ beforeAll(async () => {
   if (unavailable) return;
   server = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch(req) {
     const path = new URL(req.url).pathname;
-    if (path === '/names.js') return new Response('export const sourceTypes = {};', {headers: {'content-type':'text/javascript'}});
+    if (path === '/names.js') return new Response('export default [[], [], []]; export const types = [[], [], []]; export const sourceTypes = {};', {headers: {'content-type':'text/javascript'}});
     // A module that re-exports the host's own reaches it through `../web/`.
     const file = path.startsWith('/web/') ? `..${path}` : existsSync(new URL(`.${path}`, import.meta.url)) ? `.${path}` : `../web${path}`;
     return new Response(path.endsWith('.js') ? readFileSync(new URL(file, import.meta.url)) : '<!doctype html><body><main id="exact-root"></main>', {
@@ -91,4 +93,88 @@ test('fling preloading does not expose the trail before the geometric window rea
     rt.end(own);port.remove();return [fling,near];
   })()`);
   expect(result).toEqual([true,false]);
+});
+
+test('fixed content anchors stay out of Views, tree --ax joins fixed and row controls, and axStamp skips non-element views', async () => {
+  const setup = await evaluate(`(async () => {
+    const { install } = await import('/agent.js');
+    const port = document.createElement('div'); document.querySelector('main').append(port);
+    let headerBtn, rowBtn, footerBtn;
+    const own = rt.scope(() => list.vl(port, () => [1, 2], i => i(), (row, item) => {
+      const btn = document.createElement('button'); btn.textContent = 'Row ' + item(); row.append(btn);
+      if (item() === 1) rowBtn = btn;
+    }, {
+      est: 40, pw: [200], ph: [200],
+      fixed: [
+        el => { headerBtn = document.createElement('button'); headerBtn.textContent = 'Header Action'; el.append(headerBtn); },
+        el => { footerBtn = document.createElement('button'); footerBtn.textContent = 'Footer Action'; el.append(footerBtn); },
+      ],
+    }));
+    const c = port.$list;
+    const fixed = c.fixedItems();
+    const fixedViews = fixed.map(item => item.view);
+    const exact = (globalThis.exact = { views: rt.Views, viewId: rt.viewId, root: document.querySelector('main'), clock: rt.clock, After: rt.After, Mutations: rt.Mutations, journal: rt.journal, data: rt.data, rev: rt.rev, inflight: rt.inflight, settled: rt.settled });
+    install(exact);
+    globalThis.__cleanupFixedAx = () => { rt.end(own); port.remove(); };
+    return {
+      hasNonElement: [...rt.Views.values()].some(v => v.nodeType !== 1),
+      reservedAbsent: fixedViews.every(v => !rt.Views.has(v)),
+      distinctPositive: fixedViews.every(v => Number.isInteger(v) && v > 0) && fixedViews[0] !== fixedViews[1],
+      sides: fixedViews.map(v => c.fixedSide(v)),
+      ids: { header: rt.viewId(headerBtn), row: rt.viewId(rowBtn), footer: rt.viewId(footerBtn) },
+    };
+  })()`);
+  try {
+    expect(setup.hasNonElement).toBe(false);
+    expect(setup.reservedAbsent).toBe(true);
+    expect(setup.distinctPositive).toBe(true);
+    expect(setup.sides).toEqual([0, 1]);
+    // Run the real CDP tree --ax collector so AX joins must resolve data-agent-view on both fixed and row controls.
+    const carrier = { browser: 'chrome', call, evaluate, ask: req => evaluate(`exact.agentSettled(${JSON.stringify(req)})`) };
+    const { reply, plain } = await webAx(carrier, {}, () => carrier.ask({ op: 'tree' }));
+    expect(reply.error).toBeUndefined();
+    const joined = new Map(reply.ax.elements.filter(e => e.id != null).map(e => [e.name, e.id]));
+    expect(joined.get('Header Action')).toBe(setup.ids.header);
+    expect(joined.get('Row 1')).toBe(setup.ids.row);
+    expect(joined.get('Footer Action')).toBe(setup.ids.footer);
+    expect(plain.nodes.some(n => n.id === setup.ids.header)).toBe(true);
+    expect(plain.nodes.some(n => n.id === setup.ids.row)).toBe(true);
+    expect(plain.nodes.some(n => n.id === setup.ids.footer)).toBe(true);
+    // Defense in depth: non-element entries in Views are skipped in both axStamp and hatchRegions loops.
+    const stray = await evaluate(`(async () => {
+      const comment = document.createComment('stray');
+      document.querySelector('main').append(comment);
+      const strayId = rt.reserveViewId();
+      rt.Views.set(strayId, comment);
+      let hatchSawNonElement = false;
+      exact.hatchRegions = { of: el => { if (el.nodeType !== 1) hatchSawNonElement = true; return null; } };
+      const res = await exact.agentSettled({ op: 'axStamp' });
+      delete exact.hatchRegions;
+      rt.Views.delete(strayId);
+      comment.remove();
+      return { ok: !res.error && typeof res.nonce === 'number', hatchSawNonElement };
+    })()`);
+    expect(stray).toEqual({ ok: true, hatchSawNonElement: false });
+  } finally {
+    await evaluate('globalThis.__cleanupFixedAx?.(); delete globalThis.__cleanupFixedAx;');
+  }
+  // Wasm host axStamp guard: skips non-element views while still stamping real elements.
+  const wasmAgent = readFileSync(new URL('../web/wasm/agent.js', import.meta.url), 'utf8');
+  const stamped = new Map();
+  const realEl = { nodeType: 1, isConnected: true, getAttribute: k => stamped.get(k) ?? null, setAttribute: (k, v) => stamped.set(k, String(v)) };
+  const commentNode = { nodeType: 8, isConnected: true };
+  const bindings = {
+    views: new Map([[1, commentNode], [2, realEl]]),
+    ask: () => ({}), shownValue: () => '', host: { wasm: {}, agentClock: 0 }, INHERITED_CSS: [], now: () => 0, root: {},
+    iframeLoading: new Map(), waiting: new Map(), httpHelpers: {}, loadGpuIfNeeded: () => {}, heldNamed: x => x,
+    loadAfterPaint: () => {}, stageLoaded: () => true, loadStage: () => {}, agentMode: true, gpuInPlay: () => false,
+    register: () => {}, seek: () => {}, postSurface: () => {}, deferFulfill: () => {}, documentsGlue: () => {},
+    picker: () => {}, t0: 0, log: () => {}, readOut: () => '', presence: {}, byTicket: new Map(), writeIn: () => 0,
+    pageFacts: {}, pageChanged: () => {}, foldChanged: () => {}, followOffset: () => {}, pieces: {}, moduleReady: Promise.resolve(),
+    SETTLE_DEADLINE_MS: 1000, mediaAttached: () => false, GLIDE_BOUND_MS: 1000, collections: {}, settleCandidate: () => {},
+    tagged: x => x, performance: { timeOrigin: 123 },
+  };
+  const wasmReply = new Function(...Object.keys(bindings), glueDeclarations(wasmAgent, ['agentReply']) + '; return agentReply;')(...Object.values(bindings));
+  expect(wasmReply({ op: 'axStamp' })).toEqual({ nonce: 123 });
+  expect(stamped.get('data-agent-view')).toBe('2');
 });
