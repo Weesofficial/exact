@@ -468,7 +468,7 @@ pub(crate) fn check_component(
 }
 
 impl Scope {
-    fn push_name(&mut self, name: (String, Ref, Ty)) {
+    pub(crate) fn push_name(&mut self, name: (String, Ref, Ty)) {
         let last = self
             .frames
             .len()
