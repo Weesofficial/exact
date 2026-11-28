@@ -91,68 +91,39 @@ fn unpack_radii(packed: vec2<u32>) -> vec4<f32> {
                      f32(packed.y & 65535u), f32(packed.y >> 16u)) / 16.0;
 }
 
-fn edge_distance(q: vec2<f32>) -> f32 {
-    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0);
-}
-
-fn rounded_distance(p: vec2<f32>, rect: vec4<f32>, r: vec4<f32>) -> f32 {
-    let lo = rect.xy;
-    let hi = lo + rect.zw;
-    if p.x < lo.x + r.x && p.y < lo.y + r.x {
-        return length(p - (lo + vec2<f32>(r.x))) - r.x;
-    }
-    if p.x > hi.x - r.y && p.y < lo.y + r.y {
-        return length(p - vec2<f32>(hi.x - r.y, lo.y + r.y)) - r.y;
-    }
-    if p.x > hi.x - r.z && p.y > hi.y - r.z {
-        return length(p - (hi - vec2<f32>(r.z))) - r.z;
-    }
-    if p.x < lo.x + r.w && p.y > hi.y - r.w {
-        return length(p - vec2<f32>(lo.x + r.w, hi.y - r.w)) - r.w;
-    }
-    let q = abs(p - (lo + hi) * 0.5) - rect.zw * 0.5;
-    return edge_distance(q);
-}
-
 fn shape_coverage(p: vec2<f32>, rect: vec4<f32>, radii: vec4<f32>, pixel: vec2<f32>) -> f32 {
-    // Deep inside the shape and off every corner arc, the evaluation below
-    // gives exactly 1, so return it early. There all three samples take the
-    // straight-edge branch with q < 0, so each distance is max(q.x, q.y). With
-    // coordinates under 2^15, f32 rounding keeps each component of `normal`
-    // within 0.015, so `width` is at most 1.5 * (pixel.x + pixel.y) or 0.00001;
-    // -distance is at least 2 * (pixel.x + pixel.y) and 0.05, so
-    // 0.5 - distance / width is at least 1.83 and clamps to exactly 1. Being
-    // 0.05 clear of every radius on one axis keeps the samples, 0.01 away, off
-    // the corner branches. A NaN fails a comparison and takes the full path.
     let lo = rect.xy;
     let hi = lo + rect.zw;
-    let q = abs(p - (lo + hi) * 0.5) - rect.zw * 0.5;
-    let depth = max(q.x, q.y);
-    if depth <= -2.0 * (pixel.x + pixel.y) && depth <= -0.05
-        && all(vec4<f32>(min(q.x, q.y)) <= -0.05 - radii)
-        && all(abs(vec4<f32>(lo, hi)) < vec4<f32>(32768.0)) {
-        return 1.0;
+    let q = max(lo - p, p - hi);
+    let px = max(pixel, vec2<f32>(0.00001));
+    let box_d_px = max(q.x / px.x, q.y / px.y);
+    var d_px = box_d_px;
+    if p.x < lo.x + radii.x && p.y < lo.y + radii.x {
+        let v = p - (lo + vec2<f32>(radii.x));
+        let len = length(v);
+        let grad = select(vec2<f32>(0.70710678), abs(v) / select(1.0, len, len > 0.0), len > 0.0);
+        d_px = max((len - radii.x) / max(length(grad * pixel), 0.00001), box_d_px);
+    } else if p.x > hi.x - radii.y && p.y < lo.y + radii.y {
+        let v = p - vec2<f32>(hi.x - radii.y, lo.y + radii.y);
+        let len = length(v);
+        let grad = select(vec2<f32>(0.70710678), abs(v) / select(1.0, len, len > 0.0), len > 0.0);
+        d_px = max((len - radii.y) / max(length(grad * pixel), 0.00001), box_d_px);
+    } else if p.x > hi.x - radii.z && p.y > hi.y - radii.z {
+        let v = p - (hi - vec2<f32>(radii.z));
+        let len = length(v);
+        let grad = select(vec2<f32>(0.70710678), abs(v) / select(1.0, len, len > 0.0), len > 0.0);
+        d_px = max((len - radii.z) / max(length(grad * pixel), 0.00001), box_d_px);
+    } else if p.x < lo.x + radii.w && p.y > hi.y - radii.w {
+        let v = p - vec2<f32>(lo.x + radii.w, hi.y - radii.w);
+        let len = length(v);
+        let grad = select(vec2<f32>(0.70710678), abs(v) / select(1.0, len, len > 0.0), len > 0.0);
+        d_px = max((len - radii.w) / max(length(grad * pixel), 0.00001), box_d_px);
+    } else if q.x > 0.0 && q.y > 0.0 {
+        let len = length(q);
+        let grad = select(vec2<f32>(0.70710678), q / select(1.0, len, len > 0.0), len > 0.0);
+        d_px = len / max(length(grad * pixel), 0.00001);
     }
-    let next = p + vec2<f32>(0.01);
-    let left = max(lo.x + radii.x, lo.x + radii.w);
-    let right = min(hi.x - radii.y, hi.x - radii.z);
-    let top = max(lo.y + radii.x, lo.y + radii.y);
-    let bottom = min(hi.y - radii.z, hi.y - radii.w);
-    var distance: f32;
-    var normal: vec2<f32>;
-    if (p.x >= left && next.x <= right) || (p.y >= top && next.y <= bottom) {
-        // All three distance samples miss every corner's quadrant.
-        let n = abs(next - (lo + hi) * 0.5) - rect.zw * 0.5;
-        distance = edge_distance(q);
-        normal = vec2<f32>(edge_distance(vec2<f32>(n.x, q.y)),
-                           edge_distance(vec2<f32>(q.x, n.y))) - vec2<f32>(distance);
-    } else {
-        distance = rounded_distance(p, rect, radii);
-        normal = vec2<f32>(rounded_distance(p + vec2<f32>(0.01, 0.0), rect, radii),
-                           rounded_distance(p + vec2<f32>(0.0, 0.01), rect, radii)) - vec2<f32>(distance);
-    }
-    let width = max(dot(abs(normal) * 100.0, pixel), 0.00001);
-    let alpha = clamp(0.5 - distance / width, 0.0, 1.0);
+    let alpha = clamp(0.5 - d_px, 0.0, 1.0);
     return select(0.0, alpha, all(rect.zw > vec2<f32>(0.0)));
 }
 

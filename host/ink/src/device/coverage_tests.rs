@@ -1,8 +1,7 @@
 //! `ink.wgsl`'s coverage and shadow, held per pixel to the shader's own
-//! arithmetic run on the CPU without its early returns, at the edges of the
-//! regions those returns take: pixels either side of each, radii near half the
-//! box and uneven radii, rings, clips, transforms, outer shadows with spread
-//! and offset, and local coordinates either side of 2^15.
+//! arithmetic run on the CPU across radii near half the box and uneven radii,
+//! rings, clips, transforms, outer shadows with spread and offset, and large
+//! local coordinates.
 
 // The shader's literals, as it writes them.
 #![allow(clippy::excessive_precision, clippy::approx_constant)]
@@ -282,37 +281,52 @@ fn scenes() -> Vec<Scene> {
     scenes
 }
 
-fn rounded_distance(p: [f32; 2], rect: [f32; 4], r: [f32; 4]) -> f32 {
+/// Analytical signed distance in device pixels matching `ink.wgsl`'s `shape_coverage`.
+fn coverage(p: [f32; 2], rect: [f32; 4], radii: [f32; 4], pixel: [f32; 2]) -> f32 {
     let lo = [rect[0], rect[1]];
     let hi = [lo[0] + rect[2], lo[1] + rect[3]];
-    let corner = |c: [f32; 2], r: f32| ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2)).sqrt() - r;
-    if p[0] < lo[0] + r[0] && p[1] < lo[1] + r[0] {
-        return corner([lo[0] + r[0], lo[1] + r[0]], r[0]);
-    }
-    if p[0] > hi[0] - r[1] && p[1] < lo[1] + r[1] {
-        return corner([hi[0] - r[1], lo[1] + r[1]], r[1]);
-    }
-    if p[0] > hi[0] - r[2] && p[1] > hi[1] - r[2] {
-        return corner([hi[0] - r[2], hi[1] - r[2]], r[2]);
-    }
-    if p[0] < lo[0] + r[3] && p[1] > hi[1] - r[3] {
-        return corner([lo[0] + r[3], hi[1] - r[3]], r[3]);
-    }
-    let q = [0, 1].map(|a| (p[a] - (lo[a] + hi[a]) * 0.5).abs() - rect[2 + a] * 0.5);
-    (q[0].max(0.).powi(2) + q[1].max(0.).powi(2)).sqrt() + q[0].max(q[1]).min(0.)
-}
-
-/// The shader's `shape_coverage` without its early return.
-fn coverage(p: [f32; 2], rect: [f32; 4], radii: [f32; 4], pixel: [f32; 2]) -> f32 {
-    let distance = rounded_distance(p, rect, radii);
-    let normal = [
-        rounded_distance([p[0] + 0.01, p[1]], rect, radii) - distance,
-        rounded_distance([p[0], p[1] + 0.01], rect, radii) - distance,
+    let q = [
+        (lo[0] - p[0]).max(p[0] - hi[0]),
+        (lo[1] - p[1]).max(p[1] - hi[1]),
     ];
-    let width =
-        (normal[0].abs() * 100. * pixel[0] + normal[1].abs() * 100. * pixel[1]).max(0.00001);
+    let box_d_px = (q[0] / pixel[0].max(0.00001)).max(q[1] / pixel[1].max(0.00001));
+    let corner = |c: [f32; 2], r: f32| {
+        let v = [p[0] - c[0], p[1] - c[1]];
+        let len = (v[0] * v[0] + v[1] * v[1]).sqrt();
+        let grad = if len > 0. {
+            [v[0].abs() / len, v[1].abs() / len]
+        } else {
+            [0.70710678; 2]
+        };
+        let width = ((grad[0] * pixel[0]).powi(2) + (grad[1] * pixel[1]).powi(2))
+            .sqrt()
+            .max(0.00001);
+        ((len - r) / width).max(box_d_px)
+    };
+    let d_px = if p[0] < lo[0] + radii[0] && p[1] < lo[1] + radii[0] {
+        corner([lo[0] + radii[0], lo[1] + radii[0]], radii[0])
+    } else if p[0] > hi[0] - radii[1] && p[1] < lo[1] + radii[1] {
+        corner([hi[0] - radii[1], lo[1] + radii[1]], radii[1])
+    } else if p[0] > hi[0] - radii[2] && p[1] > hi[1] - radii[2] {
+        corner([hi[0] - radii[2], hi[1] - radii[2]], radii[2])
+    } else if p[0] < lo[0] + radii[3] && p[1] > hi[1] - radii[3] {
+        corner([lo[0] + radii[3], hi[1] - radii[3]], radii[3])
+    } else if q[0] > 0. && q[1] > 0. {
+        let len = (q[0] * q[0] + q[1] * q[1]).sqrt();
+        let grad = if len > 0. {
+            [q[0] / len, q[1] / len]
+        } else {
+            [0.70710678; 2]
+        };
+        let width = ((grad[0] * pixel[0]).powi(2) + (grad[1] * pixel[1]).powi(2))
+            .sqrt()
+            .max(0.00001);
+        len / width
+    } else {
+        box_d_px
+    };
     if rect[2] > 0. && rect[3] > 0. {
-        (0.5 - distance / width).clamp(0., 1.)
+        (0.5 - d_px).clamp(0., 1.)
     } else {
         0.
     }
@@ -460,10 +474,142 @@ fn agrees_with_the_shader_arithmetic(d: &mut impl Device) {
     }
 }
 
+fn sharp_corners_are_symmetric(d: &mut impl Device) {
+    let alpha = |pixels: &[u8], w: u32, x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize];
+    // Integer sharp rect: all four corner pixels are fully covered (no bottom-right notch).
+    let integer = Scene {
+        name: "sharp-integer",
+        size: [40, 40],
+        tolerance: 0,
+        instances: vec![rounded([10., 10., 20., 20.], [0.; 4], IDENTITY)],
+    };
+    let pixels = render(d, &integer);
+    let corners = [(10, 10), (29, 10), (10, 29), (29, 29)].map(|(x, y)| alpha(&pixels, 40, x, y));
+    assert_eq!(corners, [255, 255, 255, 255], "integer sharp rect corners");
+
+    // Symmetric fractional sharp rect: all four corners are 0.25 px inside both edges -> 191/255.
+    let fractional = Scene {
+        name: "sharp-fractional",
+        size: [40, 40],
+        tolerance: 0,
+        instances: vec![rounded([10.25, 10.25, 19.5, 19.5], [0.; 4], IDENTITY)],
+    };
+    let pixels = render(d, &fractional);
+    let corners = [(10, 10), (29, 10), (10, 29), (29, 29)].map(|(x, y)| alpha(&pixels, 40, x, y));
+    assert_eq!(
+        corners,
+        [191, 191, 191, 191],
+        "fractional sharp rect corners"
+    );
+
+    // Anisotropic scale (sx = 2, sy = 0.5 -> pixel = (0.5, 2.0)): verify continuity across
+    // the local inner diagonal q.x == q.y (no jump when q.y nudges past q.x) and 4-corner symmetry.
+    // With local [10, 10, 20, 20], device corner centers at (10.5, 5.5) map to local (10.25, 11.0);
+    // shifting ty by +0.375 places device (10.5, 5.5) at local (10.25, 10.25) -> q = (-0.25, -0.25),
+    // d_px = max(-0.5, -0.125) = -0.125 -> alpha = 0.625 -> 159/255 on both sides of the diagonal.
+    for (name, ty, expected) in [
+        ("aniso-tie", 0.375_f32, 159_u8),
+        ("aniso-below-diag", 0.374_f32, 160_u8),
+        ("aniso-above-diag", 0.376_f32, 159_u8),
+    ] {
+        let aniso = Scene {
+            name,
+            size: [60, 30],
+            tolerance: 1,
+            instances: vec![rounded(
+                [10., 10., 20., 20.],
+                [0.; 4],
+                [2., 0., 0., 0.5, -10., ty],
+            )],
+        };
+        let pixels = render(d, &aniso);
+        let tl = alpha(&pixels, 60, 10, 5);
+        let tr = alpha(&pixels, 60, 49, 5);
+        assert_eq!(tl, tr, "{name}: top corners");
+        assert!(
+            tl.abs_diff(expected) <= 1,
+            "{name}: got {tl}/255, expected {expected}/255"
+        );
+    }
+
+    // Large local coordinates (> 2^18, where +0.01 rounded away in f32): exact integer and partial coverage.
+    let large_int = Scene {
+        name: "sharp-large-int",
+        size: [40, 40],
+        tolerance: 0,
+        instances: vec![rounded(
+            [300_000., 300_000., 20., 20.],
+            [0.; 4],
+            at(-299_990., -299_990.),
+        )],
+    };
+    let pixels = render(d, &large_int);
+    let corners = [(10, 10), (29, 10), (10, 29), (29, 29)].map(|(x, y)| alpha(&pixels, 40, x, y));
+    assert_eq!(corners, [255, 255, 255, 255], "large integer corners");
+
+    let large_frac = Scene {
+        name: "sharp-large-frac",
+        size: [40, 40],
+        tolerance: 1,
+        instances: vec![rounded(
+            [300_000.25, 300_000.25, 19.5, 19.5],
+            [0.; 4],
+            at(-299_990., -299_990.),
+        )],
+    };
+    let pixels = render(d, &large_frac);
+    let corners = [(10, 10), (29, 10), (10, 29), (29, 29)].map(|(x, y)| alpha(&pixels, 40, x, y));
+    assert_eq!(corners, [191, 191, 191, 191], "large fractional corners");
+
+    // Tiny half-box circles: continuous across the center (no direction-dependent flicker).
+    for (name, shift, expected) in [
+        ("tiny-circle-center", 0.0_f32, 255_u8),
+        ("tiny-circle-diag-offset", 0.001_f32, 255_u8),
+    ] {
+        let tiny = Scene {
+            name,
+            size: [24, 24],
+            tolerance: 1,
+            instances: vec![rounded(
+                [10. + shift, 10. + shift, 1., 1.],
+                [0.5; 4],
+                IDENTITY,
+            )],
+        };
+        let pixels = render(d, &tiny);
+        assert_eq!(alpha(&pixels, 24, 10, 10), expected, "{name} center");
+    }
+
+    // Unequal-scale rounded corner join: local [10, 10, 20, 20], r = 1, scale = (0.25, 1) -> pixel = (4, 1).
+    // Sampling device (10.5, 10.5) at local x just below and at the arc join x = 11 stays continuous (~191/255).
+    let mut join_alphas = Vec::new();
+    for (name, tx) in [("aniso-arc-in", 7.752_f32), ("aniso-arc-out", 7.750_f32)] {
+        let join = Scene {
+            name,
+            size: [32, 32],
+            tolerance: 1,
+            instances: vec![rounded(
+                [10., 10., 20., 20.],
+                [1.; 4],
+                [0.25, 0., 0., 1., tx, -0.25],
+            )],
+        };
+        let pixels = render(d, &join);
+        join_alphas.push(alpha(&pixels, 32, 10, 10));
+    }
+    assert!(
+        join_alphas[0].abs_diff(191) <= 1 && join_alphas[1].abs_diff(191) <= 1,
+        "anisotropic rounded join jumped: {join_alphas:?}"
+    );
+}
+
 #[test]
 fn wgpu_coverage_and_shadows_agree_with_the_shader_arithmetic() {
     match super::wgpu::Wgpu::new() {
-        Ok(mut d) => agrees_with_the_shader_arithmetic(&mut d),
+        Ok(mut d) => {
+            agrees_with_the_shader_arithmetic(&mut d);
+            sharp_corners_are_symmetric(&mut d);
+        }
         Err(Error::NoAdapter(e)) => eprintln!("no GPU here ({e}); ink's pixels are not checked"),
         Err(e) => panic!("ink device: {e}"),
     }
@@ -472,13 +618,17 @@ fn wgpu_coverage_and_shadows_agree_with_the_shader_arithmetic() {
 #[cfg(exact_ink_metal)]
 #[test]
 fn metal_coverage_and_shadows_agree_with_the_shader_arithmetic() {
-    agrees_with_the_shader_arithmetic(&mut super::metal::Metal::new().unwrap());
+    let mut d = super::metal::Metal::new().unwrap();
+    agrees_with_the_shader_arithmetic(&mut d);
+    sharp_corners_are_symmetric(&mut d);
 }
 
 #[cfg(windows)]
 #[test]
 fn d3d11_coverage_and_shadows_agree_with_the_shader_arithmetic() {
-    agrees_with_the_shader_arithmetic(&mut super::d3d11::D3d11::new().unwrap());
+    let mut d = super::d3d11::D3d11::new().unwrap();
+    agrees_with_the_shader_arithmetic(&mut d);
+    sharp_corners_are_symmetric(&mut d);
 }
 
 #[test]

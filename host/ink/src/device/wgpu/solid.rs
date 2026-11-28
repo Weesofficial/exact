@@ -24,8 +24,9 @@ fn interior(i: &Instance, scissor: Scissor) -> Option<Scissor> {
     if !edges.iter().all(|v| v.abs() < 32768.) || !i.radii.iter().all(|r| r.is_finite()) {
         return None;
     }
-    // Inside shape_coverage's saturated region, even its two offset samples
-    // miss the arcs. Round the scissor inward so no boundary pixel changes.
+    // Inside shape_coverage's saturated region, every pixel clears every corner
+    // arc and saturates to full alpha. Round the scissor inward so no boundary
+    // pixel changes.
     let radius = i.radii.into_iter().fold(0f32, f32::max);
     let margin = (radius + 1.).max(4. * (sx.recip() + sy.recip()) + 1.);
     let left = ((x + margin) * sx + tx).ceil().max(0.) as u32;
