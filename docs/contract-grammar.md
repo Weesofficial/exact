@@ -1260,9 +1260,37 @@ Development render servers apply the table before fetching request-time data.
 A web launch revalidates only matching checkpoint answers through the real source;
 unrelated rendered answers stay settled.
 The real source parses the response, so an HTTP error status is a response,
-where `fail fetch` is a rejected connection. These fixtures cover buffered HTTP
+where `fail fetch` is a rejected connection. `answer fetch` covers buffered HTTP
 requests, including a worker's; streams, long polls, redirects, `exactBodyTo`
 and response files are not supported.
+
+`answer stream "<prefix>" [method POST] with <status> [header "<name>" "<value>"]…`
+answers matching HTTP(S) `exactStream` requests (event streams and byte streams)
+without opening the network (LLP 1103). Like `answer fetch`, it may lead a test
+or the file, or run as a step; `pass stream "<prefix>"` disarms all stream
+fixtures at that prefix. Stream fixtures live in their own namespace, so an
+`answer fetch` and an `answer stream` can share a prefix without colliding.
+
+For a streaming 2xx status (200–299 except 204 and 205), indented lines declare
+the schedule, with monotonically non-decreasing cumulative `after <ms>` offsets
+from stream open (default `after 0`):
+
+- `event <string | JSON> [name "<name>"] [id "<id>"] [after <ms>]` delivers an SSE event (`content-type: text/event-stream` by default).
+- `bytes <string | base64 "<b64>"> [after <ms>]` delivers a byte chunk (`content-type: application/octet-stream` by default; cannot mix with `event` rows).
+- `end [after <ms>]` ends the stream cleanly (HTTP EOF).
+- `fail "<message>" [after <ms>]` ends the stream with a network error and counts as an arranged failure for `expect no failures`.
+
+Without a terminal `end` or `fail`, the stream stays open after its last row so
+the test can act mid-stream (such as pressing Stop or running `drop stream`).
+`after 0` rows and `exactStreamOpen` land on `clock data`; later rows and
+virtual `exactIdleTimeout` deadlines do not extend `clock settle` on their own
+(advance virtual time with `clock +<ms>`, though any clock advance past their
+offset—including a `clock settle` moving for an unrelated animation or data
+timer—delivers them). For a non-2xx status (400–599) or 204, 205 or 304,
+the inline form `answer stream "<prefix>" with <status> [header …] [<body>] [after <ms>]`
+delivers a terminal buffered HTTP response without `exactStreamOpen`. Long polls,
+WebSockets, upload progress streams, `exactBodyFrom` and `exactBodyTo` are
+outside `answer stream`.
 
 `answer source pairing with {"phase": "code", "code": "123456"}` supplies a typed
 answer in `contract verify`. It applies to every argument list for that source.

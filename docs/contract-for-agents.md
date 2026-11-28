@@ -7720,9 +7720,15 @@ Fixtures keep request validation, file-read grants and upload limits, deadlines,
 response limits and native HTTP caching. Native prefetch and its foreground
 fallback use the same fixture. A web response and its clones keep the request URL
 and read-only headers.
-Unmatched URLs still go to the network. These are immediate, buffered responses;
-streams, redirects and `exactBodyTo` are not supported. See the
-[authored-test grammar](contract-grammar.md#authored-tests) for limits.
+Unmatched URLs still go to the network. `answer fetch` covers buffered HTTP
+responses; redirects and `exactBodyTo` are not supported. For HTTP(S)
+`exactStream` event and byte streams, use `answer stream "<prefix>" [method POST]
+with 200` followed by indented `event`, `bytes`, `end` or `fail` lines with
+cumulative `after <ms>` delays, and `pass stream "<prefix>"` to disarm it.
+`after 0` events land on `clock data`; later events park across `clock settle`
+and advance on `clock +<ms>`, letting a test interact mid-stream without a live
+server. See the [authored-test grammar](contract-grammar.md#authored-tests) for
+limits.
 
 To write through the app's own server as another person, `request POST "/items"
 {"title": "Bread"} as grace` is the driver calling it (`Authorization: Bearer grace`,

@@ -1132,7 +1132,7 @@ export const classifications = [
     ["runner:runner/src/runner/apply.rs", "Runner::apply#batch:1 Runner::apply#batch:2"],
     ["runner:runner/src/runner/background.rs", "Runner::background_landed#rounds:1"],
     ["runner:runner/src/runner/canvas2d.rs", "Canvases::reply#draws:1"],
-    ["runner:runner/src/runner/faults.rs", "Faults::take_method#hits:1 Faults::take_method#failure_hits:1 Runner::fault_dispatch#hits:1 Runner::fault_dispatch#failure_hits:1"],
+    ["runner:runner/src/runner/faults.rs", "Faults::take_method#hits:1 Faults::take_method#failure_hits:1 Faults::count_stream_hit#hits:1 Faults::count_stream_hit#failure_hits:1 Faults::count_stream_failure#failure_hits:1 Runner::fault_dispatch#hits:1 Runner::fault_dispatch#failure_hits:1"],
     ["runner:runner/src/runner/into_view.rs",
       "Runner::update_into_views_inner#batch:1 Runner::update_into_views_inner#bindings_evaluated:1 Runner::update_into_views_inner#derives_evaluated:1 " +
       "Runner::update_into_views_inner#nodes_visited:1 Runner::update_into_views_inner#regions_skipped:1 Runner::update_into_views_inner#rows_keyed:1 " +
@@ -1400,7 +1400,7 @@ export const classifications = [
       "exact_frame_health_worked history_status hitch record record_at requested_period reset snapshot stop take_maxima worked"],
     ["runner:runner/src/perf.rs", "reply"],
     ["runner:runner/src/runner/console.rs", "Console::mark Console::name Console::named"],
-    ["runner:runner/src/runner/faults.rs", "Faults::answer Faults::answer_method Faults::arm Faults::from_env Faults::holds Faults::is_empty Faults::json Faults::parse Faults::pass Faults::spec Faults::take"],
+    ["runner:runner/src/runner/faults.rs", "Faults::answer Faults::answer_method Faults::answer_stream_method Faults::arm Faults::from_env Faults::holds Faults::is_empty Faults::json Faults::parse Faults::pass Faults::pass_stream Faults::spec Faults::take"],
     ["runner:runner/src/stream_timing.rs", "committed decoded entered received report start"],
   ]),
   group("identity bookkeeping", ["one-shot"], "local cursor, metric, cache generation or diagnostic count; not a request ticket", "UI-owned",
